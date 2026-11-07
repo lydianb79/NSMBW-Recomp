@@ -1,0 +1,14 @@
+build/
+game/
+dist/
+*.rvz
+*.iso
+*.wbfs
+.work/
+*.ppm
+*.wav
+build_log.txt
+headless_log.txt
+recomp_log.txt
+.DS_Store
+__pycache__/

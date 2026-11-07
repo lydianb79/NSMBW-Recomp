@@ -1,0 +1,21 @@
+{
+  "_comment": "Names and extra entry points for the recompiler (hex addresses, SMNP01). Names only annotate the generated C; HLE overrides live in runtime/src/hle.",
+  "names": {
+    "80004050": "__start",
+    "801ACEF0": "OSSaveContext",
+    "801ACF70": "OSLoadContext",
+    "801B1AA0": "OSLink_Relocate",
+    "801B1D70": "OSLink_Link",
+    "801B2060": "OSLink",
+    "801B2070": "OSLinkFixed",
+    "801B2090": "OSUnlink",
+    "801CA7C0": "DVDConvertEntrynumToPath",
+    "801CAB70": "DVDReadAsync",
+    "801CAC60": "DVDRead",
+    "801D1370": "DVDLowInit",
+    "801DF930": "WPADInit",
+    "801E1110": "WPADSetSamplingCallback",
+    "801E11A0": "WPADSetConnectCallback"
+  },
+  "entries": []
+}
