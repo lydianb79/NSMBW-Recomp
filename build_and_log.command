@@ -8,7 +8,12 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
   if [ -f build/gen/sources.cmake ] && [ -f build/image.bin ]; then
     cmake -S . -B build/cmake -DBUILD_DATA_DIR="$PWD/build" && cmake --build build/cmake -j "$(sysctl -n hw.ncpu)"
     rc=$?
-    if [ $rc = 0 ]; then mkdir -p dist && rm -rf "dist/NSMBW Recomp.app" && cp -R "build/cmake/NSMBW Recomp.app" dist/; fi
+    if [ $rc = 0 ]; then
+      mkdir -p dist && rm -rf "dist/NSMBW Recomp.app" && cp -R "build/cmake/NSMBW Recomp.app" dist/
+      # make Finder/Dock pick up a changed app icon (macOS caches icons per app)
+      touch "dist/NSMBW Recomp.app"
+      /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "dist/NSMBW Recomp.app" 2>/dev/null
+    fi
   else
     bash scripts/build.sh "nsmb.rvz"; rc=$?
   fi
