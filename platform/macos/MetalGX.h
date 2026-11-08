@@ -20,4 +20,8 @@ id<MTLTexture> rt_metal_gx_frame(uint32_t xfb, uint32_t *w, uint32_t *h);
 /* true once display copies are kept on the GPU (the guest XFB is then not
  * written; present rt_metal_gx_frame, or the last such image) */
 bool rt_metal_gx_display_active(void);
+/* averages since the last call, per game frame: GPU time, GX thread busy
+ * time (front end + encoding) and time spent waiting for the GPU. false if no
+ * frame was made since. */
+bool rt_metal_gx_stats(double *gpu_ms, double *gx_ms, double *wait_ms, uint64_t *frames);
 #endif

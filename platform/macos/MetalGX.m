@@ -27,6 +27,7 @@
  */
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#import <QuartzCore/QuartzCore.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -66,10 +67,16 @@ static NSString *const kShaderSource = @"#include <metal_stdlib>\n"
 "  o.t6 = float2(p.tex[6][0], p.tex[6][1]); o.t7 = float2(p.tex[7][0], p.tex[7][1]);\n"
 "  return o;\n"
 "}\n"
-"struct TScale { float s[8][2]; };\n"
-"static float4 tap(int k, float2 uv, float2 gx, float2 gy, texture2d<float> t0, texture2d<float> t1, texture2d<float> t2, texture2d<float> t3,\n"
+"struct TScale { float s[8][2]; int grad; int pad[3]; };\n"
+"static float4 tap(int k, float2 uv, float2 gx, float2 gy, bool grad, texture2d<float> t0, texture2d<float> t1, texture2d<float> t2, texture2d<float> t3,\n"
 "                 texture2d<float> t4, texture2d<float> t5, texture2d<float> t6, texture2d<float> t7,\n"
 "                 sampler s0, sampler s1, sampler s2, sampler s3, sampler s4, sampler s5, sampler s6, sampler s7) {\n"
+"  if (!grad) switch (k) {\n"
+"  case 0: return t0.sample(s0, uv, level(0)); case 1: return t1.sample(s1, uv, level(0));\n"
+"  case 2: return t2.sample(s2, uv, level(0)); case 3: return t3.sample(s3, uv, level(0));\n"
+"  case 4: return t4.sample(s4, uv, level(0)); case 5: return t5.sample(s5, uv, level(0));\n"
+"  case 6: return t6.sample(s6, uv, level(0)); default: return t7.sample(s7, uv, level(0));\n"
+"  }\n"
 "  gradient2d g = gradient2d(gx, gy);\n"
 "  switch (k) {\n"
 "  case 0: return t0.sample(s0, uv, g); case 1: return t1.sample(s1, uv, g);\n"
@@ -114,15 +121,16 @@ static NSString *const kShaderSource = @"#include <metal_stdlib>\n"
 "  for (int r = 0; r < 4; r++) R[r] = int4(T.regs[r][0], T.regs[r][1], T.regs[r][2], T.regs[r][3]);\n"
 "  int4 ras0 = clamp(int4(in.c0 + 0.5), 0, 255), ras1 = clamp(int4(in.c1 + 0.5), 0, 255);\n"
 "  float2 tc[8] = { in.t0, in.t1, in.t2, in.t3, in.t4, in.t5, in.t6, in.t7 };\n"
+"  bool grad = TS.grad != 0;\n"
 "  float2 gdx[8], gdy[8];\n"
-"  for (int i = 0; i < 8; i++) { gdx[i] = dfdx(tc[i]); gdy[i] = dfdy(tc[i]); }\n"
+"  for (int i = 0; i < 8; i++) { gdx[i] = grad ? dfdx(tc[i]) : float2(0.0); gdy[i] = grad ? dfdy(tc[i]) : float2(0.0); }\n"
 "  int3 ind[4] = { int3(0), int3(0), int3(0), int3(0) };\n"
 "  for (int i = 0; i < T.nind; i++) {\n"
 "    if (T.ind_slot[i] < 0) continue;\n"
 "    float2 dv = float2(T.ind_div_s[i], T.ind_div_t[i]);\n"
 "    int ic = T.ind_coord[i] & 7;\n"
 "    float2 uv = tc[ic] * dv;\n"
-"    int4 c = int4(tap(T.ind_slot[i], uv, gdx[ic] * dv, gdy[ic] * dv, x0, x1, x2, x3, x4, x5, x6, x7, s0, s1, s2, s3, s4, s5, s6, s7) * 255.0 + 0.5);\n"
+"    int4 c = int4(tap(T.ind_slot[i], uv, gdx[ic] * dv, gdy[ic] * dv, grad, x0, x1, x2, x3, x4, x5, x6, x7, s0, s1, s2, s3, s4, s5, s6, s7) * 255.0 + 0.5);\n"
 "    ind[i] = int3(c.w, c.z, c.y);\n"
 "  }\n"
 "  float2 prevc = float2(0.0);\n"
@@ -164,7 +172,7 @@ static NSString *const kShaderSource = @"#include <metal_stdlib>\n"
 "      suv = f / td;\n"
 "    }\n"
 "    if (S.tex_slot >= 0) {\n"
-"      float4 c = tap(S.tex_slot, suv, gdx[S.coord & 7], gdy[S.coord & 7], x0, x1, x2, x3, x4, x5, x6, x7, s0, s1, s2, s3, s4, s5, s6, s7);\n"
+"      float4 c = tap(S.tex_slot, suv, gdx[S.coord & 7], gdy[S.coord & 7], grad, x0, x1, x2, x3, x4, x5, x6, x7, s0, s1, s2, s3, s4, s5, s6, s7);\n"
 "      tx = int4(c * 255.0 + 0.5);\n"
 "    }\n"
 "    int ab = S.ras == 4 ? (bump | (bump >> 5)) : bump;\n"
@@ -245,7 +253,9 @@ static NSString *const kShaderSource = @"#include <metal_stdlib>\n"
 "}\n";
 
 /* ------------------------------------------------------------ state */
-typedef struct { uint64_t hash; uint32_t w, h; uint64_t used_pass; int mips; } MTex;   /* texture objects live in g_mtex_tex */
+typedef struct { uint64_t hash; uint32_t w, h; uint64_t used_pass; int mips; } MTex;
+/* each cache slot has two textures, so a changed texture can be written while
+ * the GPU still samples the other one from the previous frame */   /* texture objects live in g_mtex_tex */
 
 static id<MTLDevice> g_dev;
 static id<MTLCommandQueue> g_queue;
@@ -261,6 +271,10 @@ static int g_ring;
 #define g_ibuf g_ibufs[g_ring]
 static volatile uint64_t g_done_pass;     /* highest pass whose command buffer has completed */
 static id<MTLCommandBuffer> g_last_disp_cb;
+/* timing for the title bar (Show FPS) */
+static volatile double g_stat_gpu_s, g_stat_wait_s, g_stat_busy_s;
+static volatile uint64_t g_stat_frames;
+static double now_s(void) { return CACurrentMediaTime(); }
 static uint32_t g_voff, g_ioff;
 static id<MTLCommandBuffer> g_cb;
 static id<MTLRenderCommandEncoder> g_enc;
@@ -271,6 +285,9 @@ static NSMutableDictionary<NSNumber *, id<MTLDepthStencilState>> *g_depths;
 static id<MTLSamplerState> g_samplers[3][3][2];
 static MTex g_mtex[TEX_SLOTS];
 static id<MTLTexture> g_mtex_tex[TEX_SLOTS];
+static MTex g_mtex_b[TEX_SLOTS];
+static id<MTLTexture> g_mtex_tex_b[TEX_SLOTS];
+static NSMutableArray<id<MTLTexture>> *g_need_mips;   /* mip chains to build before the frame runs */
 static uint64_t g_draws, g_flushes, g_copies_gpu;
 static id<MTLRenderPipelineState> g_copy_pipe, g_down_pipe;
 static NSMutableDictionary<NSNumber *, id<MTLTexture>> *g_copy_tex;   /* guest address -> copy */
@@ -355,20 +372,6 @@ static id<MTLDepthStencilState> depth_state(int enable, int func, int update) {
     return s;
 }
 
-/* 2x2 box filter of one mip level (odd sizes clamp at the edge) */
-static void mip_down(const uint8_t *src, uint32_t sw, uint32_t sh, uint8_t *dst, uint32_t dw, uint32_t dh) {
-    for (uint32_t y = 0; y < dh; y++) {
-        uint32_t y0 = y * 2 < sh ? y * 2 : sh - 1, y1 = y * 2 + 1 < sh ? y * 2 + 1 : y0;
-        for (uint32_t x = 0; x < dw; x++) {
-            uint32_t x0 = x * 2 < sw ? x * 2 : sw - 1, x1 = x * 2 + 1 < sw ? x * 2 + 1 : x0;
-            const uint8_t *a = src + ((size_t)y0 * sw + x0) * 4, *b = src + ((size_t)y0 * sw + x1) * 4;
-            const uint8_t *c = src + ((size_t)y1 * sw + x0) * 4, *d = src + ((size_t)y1 * sw + x1) * 4;
-            uint8_t *o = dst + ((size_t)y * dw + x) * 4;
-            for (int k = 0; k < 4; k++) o[k] = (uint8_t)((a[k] + b[k] + c[k] + d[k] + 2) >> 2);
-        }
-    }
-}
-
 static id<MTLTexture> upload(const RtGpuTex *t) {
     int slot = t->cache_slot;
     if (slot < 0 || slot >= TEX_SLOTS) slot = 0;
@@ -377,8 +380,14 @@ static id<MTLTexture> upload(const RtGpuTex *t) {
     if (g_mtex_tex[slot] && e->hash == t->hash && e->w == t->w && e->h == t->h && e->mips == mips) {
         e->used_pass = g_pass; return g_mtex_tex[slot];
     }
-    /* never overwrite a texture that queued or in-flight draws still sample */
-    if (!g_mtex_tex[slot] || e->w != t->w || e->h != t->h || e->mips != mips || e->used_pass > g_done_pass) {
+    /* never overwrite a texture that queued or in-flight draws still sample:
+     * swap to the slot's second texture, or make a new one */
+    if (g_mtex_tex[slot] && e->used_pass > g_done_pass) {
+        MTex tmp = *e; *e = g_mtex_b[slot]; g_mtex_b[slot] = tmp;
+        id<MTLTexture> tt = g_mtex_tex[slot]; g_mtex_tex[slot] = g_mtex_tex_b[slot]; g_mtex_tex_b[slot] = tt;
+        if (g_mtex_tex[slot] && e->used_pass > g_done_pass) g_mtex_tex[slot] = nil;
+    }
+    if (!g_mtex_tex[slot] || e->w != t->w || e->h != t->h || e->mips != mips) {
         MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                                                                      width:t->w height:t->h mipmapped:mips ? YES : NO];
         td.usage = MTLTextureUsageShaderRead;
@@ -388,24 +397,7 @@ static id<MTLTexture> upload(const RtGpuTex *t) {
     }
     id<MTLTexture> tex = g_mtex_tex[slot];
     [tex replaceRegion:MTLRegionMake2D(0, 0, t->w, t->h) mipmapLevel:0 withBytes:t->rgba bytesPerRow:t->w * 4];
-    if (mips) {
-        static uint8_t *buf[2]; static size_t cap;
-        size_t need = (size_t)t->w * t->h * 4;
-        if (need > cap) {
-            free(buf[0]); free(buf[1]);
-            buf[0] = malloc(need); buf[1] = malloc(need);
-            cap = (buf[0] && buf[1]) ? need : 0;
-        }
-        const uint8_t *src = (const uint8_t *)t->rgba;
-        uint32_t w = t->w, h = t->h;
-        for (NSUInteger lv = 1; cap && lv < tex.mipmapLevelCount; lv++) {
-            uint32_t nw = w > 1 ? w / 2 : 1, nh = h > 1 ? h / 2 : 1;
-            uint8_t *dst = buf[lv & 1];
-            mip_down(src, w, h, dst, nw, nh);
-            [tex replaceRegion:MTLRegionMake2D(0, 0, nw, nh) mipmapLevel:lv withBytes:dst bytesPerRow:nw * 4];
-            src = dst; w = nw; h = nh;
-        }
-    }
+    if (mips) [g_need_mips addObject:tex];   /* built on the GPU just before this frame's work */
     e->hash = t->hash;
     e->used_pass = g_pass;
     return tex;
@@ -459,9 +451,20 @@ static void submit(bool wait, int publish) {
             [b synchronizeResource:g_efb];
             [b endEncoding];
         }
+        if (g_need_mips.count) {
+            /* committed before g_cb, so it runs first (one queue runs command buffers in commit order) */
+            id<MTLCommandBuffer> mc = [g_queue commandBuffer];
+            id<MTLBlitCommandEncoder> b = [mc blitCommandEncoder];
+            for (id<MTLTexture> t in g_need_mips) [b generateMipmapsForTexture:t];
+            [b endEncoding];
+            [mc commit];
+            [g_need_mips removeAllObjects];
+        }
         uint64_t pass = g_pass;
         [g_cb addCompletedHandler:^(id<MTLCommandBuffer> cb) {
             if (cb.error) rt_log(0, "metal: command buffer error: %s", cb.error.localizedDescription.UTF8String);
+            double gt = cb.GPUEndTime - cb.GPUStartTime;
+            if (gt > 0 && gt < 1.0) g_stat_gpu_s += gt;
             if (pass > g_done_pass) g_done_pass = pass;            /* completions arrive in order */
             if (publish >= 0) {
                 [g_disp_lock lock];
@@ -610,7 +613,9 @@ static void mtl_draw(const RtGpuDraw *d) {
         [g_enc setVertexBuffer:g_vbuf offset:g_voff atIndex:0];
         [g_enc setFragmentBytes:&d->tev length:sizeof d->tev atIndex:0];
         /* physical / logical size of each texture: EFB copies are stored at the internal resolution */
-        float tscale[8][2];
+        struct { float s[8][2]; int32_t grad, pad[3]; } ts;
+        float (*tscale)[2] = ts.s;
+        ts.grad = g_aniso > 1; ts.pad[0] = ts.pad[1] = ts.pad[2] = 0;
         for (int i = 0; i < 8; i++) tscale[i][0] = tscale[i][1] = 1.0f;
         for (int i = 0; i < d->ntex && i < 8; i++) {
             const RtGpuTex *t = &d->tex[i];
@@ -625,7 +630,7 @@ static void mtl_draw(const RtGpuDraw *d) {
             int ws = t->wrap_s < 0 || t->wrap_s > 2 ? 0 : t->wrap_s, wt = t->wrap_t < 0 || t->wrap_t > 2 ? 0 : t->wrap_t;
             [g_enc setFragmentSamplerState:g_samplers[ws][wt][t->linear ? 1 : 0] atIndex:(NSUInteger)i];
         }
-        [g_enc setFragmentBytes:tscale length:sizeof tscale atIndex:1];
+        [g_enc setFragmentBytes:&ts length:sizeof ts atIndex:1];
         [g_enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:d->ntri * 3 indexType:MTLIndexTypeUInt32
                          indexBuffer:g_ibuf indexBufferOffset:g_ioff];
         g_voff += (vbytes + 255) & ~255u;
@@ -771,7 +776,13 @@ static int mtl_display(int x, int y, int w, int h, uint32_t xfb) {
         id<MTLCommandBuffer> prev = g_last_disp_cb;
         g_last_disp_cb = g_cb;
         submit(false, i);
+        double t0 = now_s();
         if (prev) [prev waitUntilCompleted];
+        double t1 = now_s();
+        static double last_end;
+        if (last_end > 0) { g_stat_busy_s += t0 - last_end; g_stat_wait_s += t1 - t0; }
+        last_end = t1;
+        g_stat_frames++;
         g_display_active = true;
         static uint64_t n;
         if ((++n % 600) == 0) rt_log(1, "metal: %llu draws, %llu submits, %llu GPU texture copies",
@@ -785,6 +796,19 @@ static const RtGpuSink k_metal = { mtl_draw, mtl_clear, mtl_readback, mtl_copy_t
 
 id<MTLDevice> rt_metal_gx_device(void) { return g_dev; }
 bool rt_metal_gx_display_active(void) { return g_display_active; }
+
+bool rt_metal_gx_stats(double *gpu_ms, double *gx_ms, double *wait_ms, uint64_t *frames) {
+    static double pg, pw, pb; static uint64_t pf;
+    uint64_t f = g_stat_frames;
+    if (f == pf) return false;
+    double n = (double)(f - pf);
+    if (gpu_ms) *gpu_ms = (g_stat_gpu_s - pg) * 1000.0 / n;
+    if (gx_ms) *gx_ms = (g_stat_busy_s - pb) * 1000.0 / n;
+    if (wait_ms) *wait_ms = (g_stat_wait_s - pw) * 1000.0 / n;
+    if (frames) *frames = f;
+    pg = g_stat_gpu_s; pw = g_stat_wait_s; pb = g_stat_busy_s; pf = f;
+    return true;
+}
 
 id<MTLTexture> rt_metal_gx_frame(uint32_t xfb, uint32_t *w, uint32_t *h) {
     if (!g_disp_lock) return nil;
@@ -817,6 +841,7 @@ bool rt_metal_gx_install(void) {
         g_pipes = [NSMutableDictionary dictionary];
         g_depths = [NSMutableDictionary dictionary];
         g_disp_lock = [[NSLock alloc] init];
+        g_need_mips = [NSMutableArray array];
 
         MTLTextureDescriptor *wd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                                                                       width:1 height:1 mipmapped:NO];

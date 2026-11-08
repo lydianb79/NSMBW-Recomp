@@ -6,6 +6,7 @@
 #include <mach/mach_time.h>
 #import "InputManager.h"
 #import "Renderer.h"
+#import "MetalGX.h"
 #include "rt.h"
 
 /* Display refresh -> runtime, so the game's 60 Hz clock locks to the screen
@@ -107,7 +108,21 @@ static CVReturn display_tick(CVDisplayLinkRef link, const CVTimeStamp *now, cons
     if (_fpsStart == 0) _fpsStart = now;
     if (now - _fpsStart >= 1.0) {
         double fps = _fpsFrames / (now - _fpsStart);
-        self.window.title = rt_settings.show_fps ? [NSString stringWithFormat:@"NSMBW Recomp — %.0f fps", fps] : @"NSMBW Recomp";
+        NSString *title = @"NSMBW Recomp";
+        if (rt_settings.show_fps) {
+            /* with the Metal renderer: frames the game finished (not screen refreshes), and where the time goes */
+            static uint64_t last_frames;
+            double gpu = 0, gx = 0, wait = 0; uint64_t frames = 0;
+            if (rt_metal_gx_stats(&gpu, &gx, &wait, &frames)) {
+                if (last_frames) fps = (double)(frames - last_frames) / (now - _fpsStart);
+                last_frames = frames;
+                title = [NSString stringWithFormat:@"NSMBW Recomp — %.0f fps · GPU %.1f ms · GX %.1f ms · wait %.1f ms",
+                                                   fps, gpu, gx, wait];
+            } else {
+                title = [NSString stringWithFormat:@"NSMBW Recomp — %.0f fps", fps];
+            }
+        }
+        self.window.title = title;
         _fpsFrames = 0;
         _fpsStart = now;
     }
