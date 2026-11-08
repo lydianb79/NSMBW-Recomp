@@ -374,7 +374,7 @@ static NSMutableDictionary<NSNumber *, id> *g_spec_fn;  /* tev hash -> MTLFuncti
 static NSMutableDictionary<NSNumber *, id> *g_spec_pipe;/* (hash, key, msaa) -> pipeline | NSNull */
 static NSLock *g_spec_lock;
 static int g_spec_pending;
-static uint64_t g_spec_ready, g_spec_draws, g_uber_draws;
+static uint64_t g_spec_ready, g_spec_draws, g_uber_draws, g_spec_failed, g_passes;
 
 static uint64_t tev_hash(const RtGpuTev *t, int grad) {
     uint64_t h = 1469598103934665603ull;
@@ -535,6 +535,7 @@ static id<MTLRenderPipelineState> spec_pipeline(const RtGpuTev *t, uint32_t key,
             g_spec_pending--;
             if (f) g_spec_fn[@(h)] = f;                      /* else stays NSNull: uber shader for this one */
             [g_spec_lock unlock];
+            if (!f) g_spec_failed++;
             if (!f) rt_log(0, "metal: specialised shader failed (uber shader keeps drawing it): %s",
                            err.localizedDescription.UTF8String);
         }];
@@ -617,6 +618,7 @@ static void begin_pass(void) {
     rp.depthAttachment.storeAction = MTLStoreActionStore;
     g_efb_ready = true;
     g_enc = [g_cb renderCommandEncoderWithDescriptor:rp];
+    g_passes++;
     [g_enc setViewport:(MTLViewport){ 0, 0, (double)(EFB_W * g_scale), (double)(EFB_H * g_scale), 0, 1 }];
     [g_enc setDepthClipMode:MTLDepthClipModeClamp];
     for (int i = 0; i < 8; i++) {
@@ -981,10 +983,20 @@ static int mtl_display(int x, int y, int w, int h, uint32_t xfb) {
         last_end = t1;
         g_stat_frames++;
         g_display_active = true;
-        static uint64_t n;
-        if ((++n % 600) == 0) rt_log(1, "metal: %llu draws (%llu specialised, %llu uber), %llu submits, %llu GPU texture copies, %llu shaders",
-                                     (unsigned long long)g_draws, (unsigned long long)g_spec_draws, (unsigned long long)g_uber_draws,
-                                     (unsigned long long)g_flushes, (unsigned long long)g_copies_gpu, (unsigned long long)g_spec_ready);
+        static uint64_t n, l_draws, l_spec, l_uber, l_flush, l_copy, l_pass, l_frames;
+        static double l_gpu, l_wait, l_busy;
+        if ((++n % 120) == 0) {
+            double fr = (double)(g_stat_frames - l_frames);
+            if (fr > 0)
+                rt_log(1, "metal/frame: %.0f draws (%.0f specialised, %.0f uber), %.1f EFB passes, %.1f texture copies, %.1f submits | "
+                          "GPU %.1f ms, GX %.1f ms, wait %.1f ms | %dx MSAA %d aniso %d | shaders ready %llu failed %llu compiling %d",
+                       (g_draws - l_draws) / fr, (g_spec_draws - l_spec) / fr, (g_uber_draws - l_uber) / fr,
+                       (g_passes - l_pass) / fr, (g_copies_gpu - l_copy) / fr, (g_flushes - l_flush) / fr,
+                       (g_stat_gpu_s - l_gpu) * 1000 / fr, (g_stat_busy_s - l_busy) * 1000 / fr, (g_stat_wait_s - l_wait) * 1000 / fr,
+                       g_scale, g_msaa, g_aniso, (unsigned long long)g_spec_ready, (unsigned long long)g_spec_failed, g_spec_pending);
+            l_draws = g_draws; l_spec = g_spec_draws; l_uber = g_uber_draws; l_flush = g_flushes; l_copy = g_copies_gpu;
+            l_pass = g_passes; l_frames = g_stat_frames; l_gpu = g_stat_gpu_s; l_wait = g_stat_wait_s; l_busy = g_stat_busy_s;
+        }
         apply_settings();      /* nothing is queued here: safe point to rebuild targets */
         return 1;
     }

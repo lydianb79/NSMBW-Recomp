@@ -12,8 +12,11 @@
 
 /* Runtime log goes to Console and to recomp_log.txt next to the game folder. */
 static FILE *g_logfile;
+/* the runtime log also goes to a file next to the app ("NSMBW Recomp.log") */
+static FILE *g_logf;
 static void app_log(int level, const char *msg) {
     NSLog(@"[rt%d] %s", level, msg);
+    if (g_logf) { fprintf(g_logf, "[%d] %s\n", level, msg); fflush(g_logf); }
     if (g_logfile) { fprintf(g_logfile, "[rt%d] %s\n", level, msg); fflush(g_logfile); }
 }
 static void open_logfile(void) {
@@ -76,6 +79,14 @@ static void app_fatal(const char *msg) {
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification *)note {
+    {
+        NSString *dir = [[NSBundle mainBundle].bundlePath stringByDeletingLastPathComponent];
+        g_logf = fopen([dir stringByAppendingPathComponent:@"NSMBW Recomp.log"].fileSystemRepresentation, "w");
+        if (!g_logf) {
+            NSString *lib = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Logs/NSMBW Recomp.log"];
+            g_logf = fopen(lib.fileSystemRepresentation, "w");
+        }
+    }
     rt_set_log(app_log);
     rt_set_fatal_hook(app_fatal);
     rt_settings_defaults(&rt_settings);
