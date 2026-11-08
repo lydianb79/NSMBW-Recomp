@@ -241,12 +241,10 @@ static void app_fatal(const char *msg) {
     note.enabled = NO;
     gameItem.submenu = game;
 
-    NSMenuItem *winItem = [[NSMenuItem alloc] init];
-    [bar addItem:winItem];
-    NSMenu *win = [[NSMenu alloc] initWithTitle:@"Window"];
-    [win addItemWithTitle:@"Minimize" action:@selector(performMiniaturize:) keyEquivalent:@"m"];
-    winItem.submenu = win;
-    NSApp.windowsMenu = win;
+    /* no Window menu; keep ⌘M (minimise) as a hidden shortcut in the app menu */
+    NSMenuItem *mini = [appMenu addItemWithTitle:@"Minimize" action:@selector(performMiniaturize:) keyEquivalent:@"m"];
+    mini.hidden = YES;
+    mini.allowsKeyEquivalentWhenHidden = YES;
     NSApp.mainMenu = bar;
 }
 
