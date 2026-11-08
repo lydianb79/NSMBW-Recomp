@@ -43,6 +43,7 @@ add_library(nsmbw_runtime OBJECT
   runtime/src/audio.c
   runtime/src/settings.c
   runtime/src/rt_main.c
+  runtime/src/savestate.c
   runtime/src/hle/hle_os.c
   runtime/src/hle/hle_wpad.c
   runtime/src/hle/hle_dsp.c

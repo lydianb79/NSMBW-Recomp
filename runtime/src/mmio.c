@@ -357,3 +357,13 @@ uint8_t  ppc_mmio_read8(uint32_t ea)  { return (uint8_t)mmio_read(ea, 1); }
 void ppc_mmio_write32(uint32_t ea, uint32_t v) { mmio_write(ea, v, 4); }
 void ppc_mmio_write16(uint32_t ea, uint16_t v) { mmio_write(ea, v, 2); }
 void ppc_mmio_write8(uint32_t ea, uint8_t v)   { mmio_write(ea, v, 1); }
+
+/* save states */
+void rt_mmio_ss_register(void) {
+    rt_ss_add(g_cc, sizeof g_cc); rt_ss_add(g_cd, sizeof g_cd);
+    rt_ss_add(&rt_vi_xfb_addr, sizeof rt_vi_xfb_addr); rt_ss_add(&rt_vi_width, sizeof rt_vi_width);
+    rt_ss_add(&rt_vi_height, sizeof rt_vi_height); rt_ss_add(&rt_vi_stride, sizeof rt_vi_stride);
+    rt_ss_add(&rt_pi_intsr, sizeof rt_pi_intsr); rt_ss_add(&rt_pi_intmr, sizeof rt_pi_intmr);
+    rt_ss_add(&g_dsp_mail_full, sizeof g_dsp_mail_full); rt_ss_add(&g_dsp_mail, sizeof g_dsp_mail);
+    rt_ss_add(&g_ai_base_tb, sizeof g_ai_base_tb); rt_ss_add(&g_ai_base_count, sizeof g_ai_base_count);
+}

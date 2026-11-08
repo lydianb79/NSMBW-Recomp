@@ -31,7 +31,7 @@ static void wav_header(FILE *f, uint32_t frames) {
 }
 
 void rt_audio_submit(const int32_t *mix, int frames) {
-    int vol = rt_settings.audio_volume;              /* 0..100 */
+    int vol = rt_settings.audio_mute ? 0 : rt_settings.audio_volume;   /* 0..100 */
     int16_t tmp[2 * 128];
     if (frames > 128) frames = 128;
     for (int i = 0; i < frames * 2; i++) {

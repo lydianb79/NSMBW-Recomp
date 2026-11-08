@@ -62,6 +62,19 @@ static void *watchdog(void *arg) {
                 (unsigned long long)rt_stats.gx_fifo_bytes, (unsigned long long)rt_gx.draws,
                 (unsigned long long)rt_gx.efb_copies, (unsigned long long)rt_stats.vi_frames,
                 (unsigned long long)rt_stats.hle_hits);
+        {   /* RT_SS="save0@20,load0@30": save / load states at given seconds */
+            const char *ss = getenv("RT_SS");
+            if (ss) {
+                char buf[256]; snprintf(buf, sizeof buf, "%s", ss);
+                for (char *tok = strtok(buf, ","); tok; tok = strtok(NULL, ",")) {
+                    int slot, at; char op[8];
+                    if (sscanf(tok, "%4[a-z]%d@%d", op, &slot, &at) == 3 && at == s + 1)
+                        fprintf(stderr, "savestate %s slot %d: %s\n", op, slot, rt_savestate_request(!strcmp(op, "save"), slot) ? "requested" : "refused");
+                }
+            }
+            static int seen; char m[128]; int q = rt_savestate_message(m, sizeof m);
+            if (q != seen) { seen = q; fprintf(stderr, "savestate: %s\n", m); }
+        }
         const char *snap = getenv("RT_SNAP");   /* RT_SNAP="20,30,40": dump snap_<s>.ppm at those seconds */
         if (snap) {
             char buf[256]; snprintf(buf, sizeof buf, ",%s,", snap);

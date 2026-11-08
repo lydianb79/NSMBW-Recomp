@@ -106,7 +106,7 @@ static void guest_call2(PPCContext *ctx, uint8_t *base, uint32_t fn, uint32_t a0
 static void ax_run_aux(PPCContext *ctx, uint8_t *base) {
     static int off = -1;
     if (off < 0) off = getenv("RT_NO_REVERB") != NULL;
-    if (off) return;
+    if (off || !rt_settings.audio_reverb) return;     /* effects not run: dry mix only */
     const int32_t cb_sda[2] = { AX_AUXA_CB_SDA, AX_AUXB_CB_SDA }, cx_sda[2] = { AX_AUXA_CTX_SDA, AX_AUXB_CTX_SDA };
     int dpl2 = ld32(base, ctx->r[13] + (uint32_t)AX_OUTPUT_MODE_SDA) == 2;
     for (int bus = 0; bus < 2; bus++) {
@@ -139,7 +139,7 @@ static void ax_mix_remote(void) {
     static float hp_x, hp_y, lp_y;
     static int off = -1;
     if (off < 0) off = getenv("RT_NO_REMOTE_SPEAKER") != NULL;
-    if (off) return;
+    if (off || !rt_settings.remote_speaker) return;
     /* the stream the game sends to the remotes is the real thing; the AX
      * remote bus is the fallback while nothing is being streamed */
     static int32_t stream[AX_FRAME];
@@ -152,7 +152,7 @@ static void ax_mix_remote(void) {
         float y = a_hp * (hp_y + x - hp_x);
         hp_x = x; hp_y = y;
         lp_y += a_lp * (y - lp_y);
-        int32_t o = (int32_t)(lp_y * 0.8f);
+        int32_t o = (int32_t)(lp_y * 0.8f * (float)rt_settings.remote_volume / 80.0f);
         g_mix[k * 2] += o; g_mix[k * 2 + 1] += o;
     }
 }

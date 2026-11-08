@@ -38,6 +38,11 @@ typedef struct {
     RtTexFilter texture_filter;
     int         renderer;           /* 0 = Metal (GPU), 1 = software (CPU); applied at start-up */
     int         audio_volume;       /* 0..100 */
+    bool        audio_mute;
+    bool        audio_reverb;       /* the game's reverb / effects (aux buses) */
+    bool        remote_speaker;     /* Wii Remote speaker sounds on the computer's output */
+    int         remote_volume;      /* 0..100, relative to the main volume */
+    int         audio_latency_ms;   /* output buffer: 20..200 */
     int         app_icon;           /* 0-4 islands (day..autumn), 5 arcade chip, 6 pixel leap, 7 neon, 8 paper, 9 minimal */
     int         anisotropy;         /* 1,2,4,8,16 */
     int         msaa;               /* 1,2,4 */
@@ -97,6 +102,16 @@ void rt_vi_display_sync(int64_t next_vsync_in_ns, uint64_t period_ns);
 /* 32 kHz interleaved stereo int16. Fills `frames` frames (silence when the game
  * has produced nothing yet) and returns how many were real audio. */
 int rt_audio_read(int16_t *dst, int frames);
+
+/* ------------------------------------------------------------ save states */
+/* Save / load the whole game state in slot 0..2 (kept in memory for this app
+ * session). Asynchronous: serviced by the game at its next safe point. Returns
+ * false if the request was refused (busy, or loading an empty slot). */
+bool rt_savestate_request(bool save, int slot);
+bool rt_savestate_slot_info(int slot, long *saved_unix_time);
+/* last status message ("State saved to slot 1", ...); the return value
+ * increases with every new message */
+int  rt_savestate_message(char *buf, int n);
 
 /* ------------------------------------------------------------ lifecycle */
 typedef void (*RtLogFn)(int level, const char *msg);

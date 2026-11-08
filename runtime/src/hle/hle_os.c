@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 /*
  * hle_os.c - high-level replacements for the parts of the Revolution SDK OS
  * that cannot work under static recompilation as-is:
@@ -18,6 +19,8 @@
  */
 #include <pthread.h>
 #include <setjmp.h>
+#include <alloca.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -78,32 +81,85 @@ typedef struct RtThread {
     jmp_buf *sel_jmp;           /* innermost active SelectThread call (idle-switch unwinding) */
     jmp_buf *irq_sel_jmp;       /* SelectThread call that was active when the current interrupt was taken */
     struct RtThread *next;
+    /* save states (savestate.c): every waiting thread parks in wait_for_baton */
+    jmp_buf park_jb;            /* where this thread waits for the baton */
+    uintptr_t park_sp;          /* stack address at the park point */
+    uintptr_t stack_hi;         /* top of this host thread's stack (only frames below it are guest state) */
+    unsigned restore_seen;
+    struct RtThread *all_next;  /* every host thread ever created (the list above can be rewound) */
 } RtThread;
 
 static pthread_mutex_t g_baton = PTHREAD_MUTEX_INITIALIZER;
-static RtThread *g_threads, *g_running;
+static RtThread *g_threads, *g_running, *g_all_threads;
 static __thread RtThread *t_self;
 static RtThread g_main_thread;
+static unsigned g_restore_gen;
+void rt_ss_self_restore(void *thread);          /* never returns if the loaded state has this thread */
+void rt_ss_orphan(void);
 
 static RtThread *thread_by_ctx(uint32_t a) {
     for (RtThread *t = g_threads; t; t = t->next) if (t->ctx_addr == a && !t->dead) return t;
     return NULL;
 }
 
+/* Every thread that does not hold the baton waits here. The park point is
+ * what a save state records (with the stack above it); a load longjmps each
+ * thread back to the park point it had when the state was saved. */
+static __attribute__((noinline)) void wait_for_baton(RtThread *self) {
+    volatile int marker = 0;
+    (void)setjmp(self->park_jb);
+    self = t_self;                       /* (reloaded registers: re-read from TLS) */
+    self->park_sp = (uintptr_t)&marker;
+    pthread_mutex_lock(&g_baton);
+    for (;;) {
+        if (self->restore_seen != g_restore_gen) {
+            self->restore_seen = g_restore_gen;
+            pthread_mutex_unlock(&g_baton);
+            rt_ss_self_restore(self);    /* returns only for threads the state did not have */
+            pthread_mutex_lock(&g_baton);
+            continue;
+        }
+        if (g_running == self) break;
+        pthread_cond_wait(&self->cond, &g_baton);
+    }
+    pthread_mutex_unlock(&g_baton);
+}
+
 static void baton_pass_and_wait(RtThread *self, RtThread *to) {
     pthread_mutex_lock(&g_baton);
     g_running = to;
     pthread_cond_signal(&to->cond);
-    while (g_running != self) pthread_cond_wait(&self->cond, &g_baton);
     pthread_mutex_unlock(&g_baton);
+    wait_for_baton(self);
+}
+
+/* highest address of the calling thread's stack */
+static uintptr_t host_stack_top(void) {
+#ifdef __APPLE__
+    return (uintptr_t)pthread_get_stackaddr_np(pthread_self());
+#else
+    pthread_attr_t a; void *addr = NULL; size_t sz = 0;
+    if (pthread_getattr_np(pthread_self(), &a)) return UINTPTR_MAX;
+    pthread_attr_getstack(&a, &addr, &sz);
+    pthread_attr_destroy(&a);
+    return (uintptr_t)addr + sz;
+#endif
+}
+/* upper end of the stack range a save state must cover: a little above the
+ * given frame (that frame stays live for the thread's whole life), never past
+ * the real stack top */
+static uintptr_t stack_hi_from(uintptr_t frame, uintptr_t above) {
+    uintptr_t top = host_stack_top(), hi = frame + above;
+    if (top > 64 && hi > top - 64) hi = top - 64;
+    return hi & ~(uintptr_t)15;
 }
 
 static void *thread_main(void *arg) {
     RtThread *t = arg;
+    volatile int top = 0;
     t_self = t;
-    pthread_mutex_lock(&g_baton);
-    while (g_running != t) pthread_cond_wait(&t->cond, &g_baton);
-    pthread_mutex_unlock(&g_baton);
+    t->stack_hi = stack_hi_from((uintptr_t)&top, 512);
+    wait_for_baton(t);
     rt_log(2, "thread %08X: start entry %08X sp %08X", t->ctx_addr, t->entry, t->ctx.r[1]);
     t->ctx.lr = t->exit_lr;
     ppc_call(&t->ctx, rt_base, t->entry);
@@ -122,6 +178,9 @@ static RtThread *thread_create(uint32_t ctx_addr) {
     t->started = 1;
     t->next = g_threads;
     g_threads = t;
+    t->restore_seen = g_restore_gen;
+    t->all_next = g_all_threads;
+    g_all_threads = t;
     pthread_attr_t at;
     pthread_attr_init(&at);
     pthread_attr_setstacksize(&at, 64u << 20);   /* recompiled code recurses deeply */
@@ -135,6 +194,7 @@ void rt_threads_init_main(PPCContext *ctx) {
     pthread_cond_init(&g_main_thread.cond, NULL);
     g_main_thread.started = 1;
     g_threads = &g_main_thread;
+    g_all_threads = &g_main_thread;
     g_running = &g_main_thread;
     t_self = &g_main_thread;
 }
@@ -144,6 +204,7 @@ PPCContext *rt_thread_main_ctx(void) { return &g_main_thread.ctx; }
  * app initialises on the UI thread but runs the game on its own thread.) */
 void rt_threads_bind_current(void) {
     t_self = &g_main_thread;
+    if (!g_main_thread.stack_hi) { volatile int top = 0; g_main_thread.stack_hi = stack_hi_from((uintptr_t)&top, 4096); }
     pthread_mutex_lock(&g_baton);
     g_running = &g_main_thread;
     pthread_mutex_unlock(&g_baton);
@@ -282,8 +343,129 @@ static void rt_irq_deliver(PPCContext *ctx, uint8_t *base) {
     self->irq_sel_jmp = prev_sel;
 }
 
+/* ------------------------------------------------------------ save states: thread side */
+/* A save state stores, per guest thread, its RtThread fields and the part of
+ * its host stack above where it is parked (recompiled guest frames are host C
+ * frames). Loading copies each stack back to the same addresses and longjmps
+ * the thread to its park point - which is why a state only loads within the
+ * same app session. */
+typedef struct {
+    RtThread *t;
+    uint32_t ctx_addr, entry, exit_lr, irq_ctx;
+    PPCContext ctx;
+    int started, dead;
+    jmp_buf *irq_jmp, *sel_jmp, *irq_sel_jmp;
+    RtThread *next;
+    jmp_buf jb;                 /* where the thread resumes on load */
+    uintptr_t lo, hi;           /* stack image range */
+    uint8_t *stack;
+} RtSsThread;
+#define SS_MAX_THREADS 64
+typedef struct { RtSsThread th[SS_MAX_THREADS]; int n; RtThread *running; } RtSsSet;
+
+void *rt_ss_threads_alloc(void) { return calloc(1, sizeof(RtSsSet)); }
+
+/* running thread, all others parked */
+int rt_ss_threads_save(void *set_, jmp_buf *self_jb, uintptr_t self_sp) {
+    RtSsSet *set = set_;
+    for (int i = 0; i < set->n; i++) { free(set->th[i].stack); set->th[i].stack = NULL; }
+    set->n = 0;
+    set->running = g_running;
+    for (RtThread *t = g_threads; t; t = t->next) {
+        if (set->n >= SS_MAX_THREADS) return -1;
+        RtSsThread *s = &set->th[set->n++];
+        s->t = t; s->ctx_addr = t->ctx_addr; s->entry = t->entry; s->exit_lr = t->exit_lr; s->irq_ctx = t->irq_ctx;
+        s->ctx = t->ctx; s->started = t->started; s->dead = t->dead;
+        s->irq_jmp = t->irq_jmp; s->sel_jmp = t->sel_jmp; s->irq_sel_jmp = t->irq_sel_jmp; s->next = t->next;
+        uintptr_t sp;
+        if (t == t_self) { memcpy(&s->jb, self_jb, sizeof(jmp_buf)); sp = self_sp; }
+        else { memcpy(&s->jb, &t->park_jb, sizeof(jmp_buf)); sp = t->park_sp; }
+        s->lo = (sp - 8192) & ~(uintptr_t)15;
+        s->hi = t->stack_hi;
+        s->stack = NULL;
+        if (!t->stack_hi || s->hi <= s->lo || s->hi - s->lo > (64u << 20)) return -1;
+        s->stack = malloc(s->hi - s->lo);
+        if (!s->stack) return -1;
+        memcpy(s->stack, (void *)s->lo, s->hi - s->lo);
+    }
+    return set->n;
+}
+
+static RtSsSet *g_load_set;
+
+/* runs below the stack range it restores (see rt_ss_self_restore) */
+static __attribute__((noinline, noreturn)) void ss_copy_and_jump(RtSsThread *s, volatile char *pad) {
+    (void)pad;
+    memcpy((void *)s->lo, s->stack, s->hi - s->lo);
+    longjmp(s->jb, 1);
+}
+
+/* Restore the calling thread's own stack from the state being loaded and
+ * resume at its saved park point. Returns only if the state has no such
+ * thread. To overwrite its own stack safely the thread first moves its stack
+ * pointer below the restored range (alloca), then copies and longjmps up. */
+void rt_ss_self_restore(void *thread) {
+    RtSsSet *set = g_load_set;
+    if (!set) return;
+    RtSsThread *s = NULL;
+    for (int i = 0; i < set->n; i++) if (set->th[i].t == thread) s = &set->th[i];
+    if (!s || !s->stack) return;
+    volatile char probe = 0;
+    uintptr_t sp = (uintptr_t)&probe, below = s->lo - 65536;
+    volatile char *pad = NULL;
+    if (sp > below) { pad = alloca(sp - below); pad[0] = probe; }
+    ss_copy_and_jump(s, pad);
+}
+
+/* a host thread the loaded state does not know: wait (it may be needed again
+ * by a later load of an older state) */
+void rt_ss_orphan(void) {
+    RtThread *self = t_self;
+    pthread_mutex_lock(&g_baton);
+    for (;;) {
+        if (self->restore_seen != g_restore_gen) {
+            self->restore_seen = g_restore_gen;
+            pthread_mutex_unlock(&g_baton);
+            rt_ss_self_restore(self);
+            pthread_mutex_lock(&g_baton);
+            continue;
+        }
+        pthread_cond_wait(&self->cond, &g_baton);
+    }
+}
+
+/* Running thread, everything else parked, guest memory already restored: put
+ * the thread list back, wake every host thread so it restores its own stack,
+ * then restore ourselves. Does not return. */
+void rt_ss_threads_load(void *set_) {
+    RtSsSet *set = set_;
+    for (int i = 0; i < set->n; i++) {
+        RtSsThread *s = &set->th[i];
+        RtThread *t = s->t;
+        t->ctx_addr = s->ctx_addr; t->entry = s->entry; t->exit_lr = s->exit_lr; t->irq_ctx = s->irq_ctx;
+        t->ctx = s->ctx; t->started = s->started; t->dead = s->dead;
+        t->irq_jmp = s->irq_jmp; t->sel_jmp = s->sel_jmp; t->irq_sel_jmp = s->irq_sel_jmp; t->next = s->next;
+    }
+    g_threads = set->n ? set->th[0].t : NULL;
+    g_load_set = set;
+    RtThread *self = t_self;
+    pthread_mutex_lock(&g_baton);
+    g_running = set->running;
+    g_restore_gen++;
+    self->restore_seen = g_restore_gen;
+    for (RtThread *t = g_all_threads; t; t = t->all_next) pthread_cond_signal(&t->cond);
+    pthread_mutex_unlock(&g_baton);
+    ppc_irq_pending = 1;
+    rt_ss_self_restore(self);
+    rt_ss_orphan();
+}
+
+extern volatile int rt_ss_request;
+void rt_savestate_service(PPCContext *ctx);
+
 void rt_ai_dma_apply(void);
 void ppc_irq_check(PPCContext *ctx, uint8_t *base) {
+    if (rt_ss_request) rt_savestate_service(ctx);
     if (g_vi_due) { g_vi_due = 0; rt_vi_retrace_irq(); }
     rt_ai_dma_apply();
     int more = rt_ios_poll();

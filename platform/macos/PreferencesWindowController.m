@@ -1,4 +1,4 @@
-// PreferencesWindowController.m - Graphics / Input / Game tabs, built in code.
+// PreferencesWindowController.m - Graphics / Input / Audio / Game tabs, built in code.
 // Every change is applied to rt_settings immediately and saved.
 #import "PreferencesWindowController.h"
 #import "AppDelegate.h"
@@ -93,17 +93,52 @@ static NSTextField *label(NSString *s, NSRect r) {
     NSTabViewItem *i = [[NSTabViewItem alloc] initWithIdentifier:@"input"];
     i.label = @"Input";
     i.view = [self inputView];
+    NSTabViewItem *a = [[NSTabViewItem alloc] initWithIdentifier:@"audio"];
+    a.label = @"Audio";
+    a.view = [self audioView];
     NSTabViewItem *p = [[NSTabViewItem alloc] initWithIdentifier:@"game"];
     p.label = @"Game";
     p.view = [self gameTabView];
     [tabs addTabViewItem:g];
     [tabs addTabViewItem:i];
+    [tabs addTabViewItem:a];
     [tabs addTabViewItem:p];
     self.window.contentView = tabs;
 }
 
 enum { G_RENDERER = 30, G_ICON = 31, G_RES = 1, G_FILTER, G_SCALE, G_ASPECT, G_TEX, G_ANISO, G_MSAA, G_FPS,
-       G_VSYNC = 20, G_WIDE, G_SHOWFPS, G_FULL, S_SCAN = 40, S_SHARP, S_VOLUME };
+       G_VSYNC = 20, G_WIDE, G_SHOWFPS, G_FULL, S_SCAN = 40, S_SHARP, S_VOLUME,
+       A_MUTE = 50, A_REVERB, A_REMOTE, A_LATENCY, S_RVOLUME = 60 };
+
+#pragma mark - audio
+
+- (NSView *)audioView {
+    NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 580, 580)];
+    CGFloat y = 530, L = 20, W = 190, X = 220, PW = 240, dy = 36;
+    [v addSubview:label(@"Volume:", NSMakeRect(L, y, W, 20))];
+    [self slider:rt_settings.audio_volume / 100.0 at:NSMakeRect(X, y, PW, 20) tag:S_VOLUME in:v]; y -= 30;
+    [self check:@"Mute" at:NSMakeRect(X, y, PW, 20) on:rt_settings.audio_mute tag:A_MUTE in:v]; y -= dy + 6;
+    [self check:@"Reverb and effects (as the game sets them)" at:NSMakeRect(X, y, PW + 120, 20)
+             on:rt_settings.audio_reverb tag:A_REVERB in:v]; y -= dy;
+    [self check:@"Wii Remote speaker sounds" at:NSMakeRect(X, y, PW + 60, 20) on:rt_settings.remote_speaker tag:A_REMOTE in:v]; y -= 30;
+    [v addSubview:label(@"Remote speaker volume:", NSMakeRect(L, y, W, 20))];
+    [self slider:rt_settings.remote_volume / 100.0 at:NSMakeRect(X, y, PW, 20) tag:S_RVOLUME in:v]; y -= dy + 6;
+    [v addSubview:label(@"Latency:", NSMakeRect(L, y, W, 20))];
+    static const int lat[] = { 30, 45, 60, 90, 120, 200 };
+    NSInteger li = 2;
+    for (int k = 0; k < 6; k++) if (rt_settings.audio_latency_ms >= lat[k]) li = k;
+    NSPopUpButton *lp = [self popup:@[ @"30 ms (lowest)", @"45 ms", @"60 ms (default)", @"90 ms", @"120 ms", @"200 ms (safest)" ]
+                                 at:NSMakeRect(X, y - 4, PW, 26) selected:li tag:A_LATENCY in:v];
+    (void)lp; y -= dy + 10;
+    NSTextField *note = [NSTextField wrappingLabelWithString:
+        @"Output is 32 kHz stereo, mixed from the game's own voices. Wii Remote speaker sounds play through the "
+         "computer, filtered to sound like the remote's small speaker. Raise the latency if you hear crackles."];
+    note.frame = NSMakeRect(L, y - 30, 540, 50);
+    note.textColor = NSColor.secondaryLabelColor;
+    note.font = [NSFont systemFontOfSize:11];
+    [v addSubview:note];
+    return v;
+}
 
 - (NSView *)graphicsView {
     NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 580, 688)];
@@ -145,8 +180,6 @@ enum { G_RENDERER = 30, G_ICON = 31, G_RES = 1, G_FILTER, G_SCALE, G_ASPECT, G_T
     [self slider:rt_settings.crt_scanline at:NSMakeRect(X, y, PW, 20) tag:S_SCAN in:v]; y -= dy;
     [v addSubview:label(@"Sharpness:", NSMakeRect(L, y, W, 20))];
     [self slider:rt_settings.sharpness at:NSMakeRect(X, y, PW, 20) tag:S_SHARP in:v]; y -= dy;
-    [v addSubview:label(@"Audio volume:", NSMakeRect(L, y, W, 20))];
-    [self slider:rt_settings.audio_volume / 100.0 at:NSMakeRect(X, y, PW, 20) tag:S_VOLUME in:v]; y -= dy + 4;
     [self check:@"V-Sync" at:NSMakeRect(X, y, PW, 20) on:rt_settings.vsync tag:G_VSYNC in:v]; y -= 26;
     [self check:@"Widescreen 16:9 (needs restart)" at:NSMakeRect(X, y, PW + 60, 20) on:rt_settings.widescreen tag:G_WIDE in:v]; y -= 26;
     [self check:@"Show FPS in title bar" at:NSMakeRect(X, y, PW, 20) on:rt_settings.show_fps tag:G_SHOWFPS in:v]; y -= 26;
@@ -174,6 +207,7 @@ enum { G_RENDERER = 30, G_ICON = 31, G_RES = 1, G_FILTER, G_SCALE, G_ASPECT, G_T
         case G_ANISO: rt_settings.anisotropy = 1 << i; break;
         case G_MSAA: rt_settings.msaa = i == 0 ? 1 : i == 1 ? 2 : 4; break;
         case G_FPS: rt_settings.fps_limit = i == 0 ? 60 : i == 1 ? 50 : i == 2 ? 120 : 0; break;
+        case A_LATENCY: { static const int lat[] = { 30, 45, 60, 90, 120, 200 }; rt_settings.audio_latency_ms = lat[i < 0 ? 2 : i > 5 ? 5 : i]; break; }
     }
     [self changed];
 }
@@ -185,6 +219,9 @@ enum { G_RENDERER = 30, G_ICON = 31, G_RES = 1, G_FILTER, G_SCALE, G_ASPECT, G_T
         case G_WIDE: rt_settings.widescreen = on; break;
         case G_SHOWFPS: rt_settings.show_fps = on; break;
         case G_FULL: rt_settings.fullscreen = on; break;
+        case A_MUTE: rt_settings.audio_mute = on; break;
+        case A_REVERB: rt_settings.audio_reverb = on; break;
+        case A_REMOTE: rt_settings.remote_speaker = on; break;
     }
     [self changed];
 }
@@ -193,6 +230,7 @@ enum { G_RENDERER = 30, G_ICON = 31, G_RES = 1, G_FILTER, G_SCALE, G_ASPECT, G_T
     if (s.tag == S_SCAN) rt_settings.crt_scanline = (float)s.doubleValue;
     if (s.tag == S_SHARP) rt_settings.sharpness = (float)s.doubleValue;
     if (s.tag == S_VOLUME) rt_settings.audio_volume = (int)(s.doubleValue * 100.0 + 0.5);
+    if (s.tag == S_RVOLUME) rt_settings.remote_volume = (int)(s.doubleValue * 100.0 + 0.5);
     [self changed];
 }
 

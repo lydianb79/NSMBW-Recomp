@@ -12,11 +12,8 @@
 
 /* Runtime log goes to Console and to recomp_log.txt next to the game folder. */
 static FILE *g_logfile;
-/* the runtime log also goes to a file next to the app ("NSMBW Recomp.log") */
-static FILE *g_logf;
 static void app_log(int level, const char *msg) {
     NSLog(@"[rt%d] %s", level, msg);
-    if (g_logf) { fprintf(g_logf, "[%d] %s\n", level, msg); fflush(g_logf); }
     if (g_logfile) { fprintf(g_logfile, "[rt%d] %s\n", level, msg); fflush(g_logfile); }
 }
 static void open_logfile(void) {
@@ -45,6 +42,7 @@ static void app_fatal(const char *msg) {
 @implementation AppDelegate {
     PreferencesWindowController *_prefs;
     NSThread *_gameThread;
+    int _slot;                     /* save-state slot 0..2 */
 }
 
 + (NSString *)supportDirectory {
@@ -79,14 +77,6 @@ static void app_fatal(const char *msg) {
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification *)note {
-    {
-        NSString *dir = [[NSBundle mainBundle].bundlePath stringByDeletingLastPathComponent];
-        g_logf = fopen([dir stringByAppendingPathComponent:@"NSMBW Recomp.log"].fileSystemRepresentation, "w");
-        if (!g_logf) {
-            NSString *lib = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Logs/NSMBW Recomp.log"];
-            g_logf = fopen(lib.fileSystemRepresentation, "w");
-        }
-    }
     rt_set_log(app_log);
     rt_set_fatal_hook(app_fatal);
     rt_settings_defaults(&rt_settings);
@@ -234,6 +224,23 @@ static void app_fatal(const char *msg) {
     scaleItem.submenu = scales;
     viewItem.submenu = view;
 
+    /* Game: save states (in memory, this session) */
+    NSMenuItem *gameItem = [[NSMenuItem alloc] init];
+    [bar addItem:gameItem];
+    NSMenu *game = [[NSMenu alloc] initWithTitle:@"Game"];
+    [game addItemWithTitle:@"Save State" action:@selector(saveState:) keyEquivalent:@"s"];
+    [game addItemWithTitle:@"Load State" action:@selector(loadState:) keyEquivalent:@"l"];
+    [game addItem:[NSMenuItem separatorItem]];
+    for (int i = 0; i < 3; i++) {
+        NSMenuItem *it = [game addItemWithTitle:[NSString stringWithFormat:@"Slot %d", i + 1] action:@selector(pickSlot:)
+                                  keyEquivalent:[NSString stringWithFormat:@"%d", i + 7]];
+        it.tag = i;
+    }
+    [game addItem:[NSMenuItem separatorItem]];
+    NSMenuItem *note = [game addItemWithTitle:@"States are kept until the app quits" action:nil keyEquivalent:@""];
+    note.enabled = NO;
+    gameItem.submenu = game;
+
     NSMenuItem *winItem = [[NSMenuItem alloc] init];
     [bar addItem:winItem];
     NSMenu *win = [[NSMenu alloc] initWithTitle:@"Window"];
@@ -247,11 +254,27 @@ static void app_fatal(const char *msg) {
     if (item.action == @selector(pickFilter:)) item.state = item.tag == (NSInteger)rt_settings.output_filter ? NSControlStateValueOn : NSControlStateValueOff;
     if (item.action == @selector(pickScale:)) item.state = item.tag == (NSInteger)rt_settings.scale_mode ? NSControlStateValueOn : NSControlStateValueOff;
     if (item.action == @selector(toggleFPS:)) item.state = rt_settings.show_fps ? NSControlStateValueOn : NSControlStateValueOff;
+    if (item.action == @selector(pickSlot:)) {
+        long when = 0;
+        bool used = rt_savestate_slot_info((int)item.tag, &when);
+        NSString *t = [NSString stringWithFormat:@"Slot %ld", (long)item.tag + 1];
+        if (used) {
+            NSDateFormatter *f = [[NSDateFormatter alloc] init];
+            f.timeStyle = NSDateFormatterMediumStyle; f.dateStyle = NSDateFormatterNoStyle;
+            t = [t stringByAppendingFormat:@" — %@", [f stringFromDate:[NSDate dateWithTimeIntervalSince1970:when]]];
+        } else t = [t stringByAppendingString:@" — empty"];
+        item.title = t;
+        item.state = item.tag == _slot ? NSControlStateValueOn : NSControlStateValueOff;
+    }
+    if (item.action == @selector(loadState:)) return rt_savestate_slot_info(_slot, NULL);
     return YES;
 }
 
 - (void)pickFilter:(NSMenuItem *)item { rt_settings.output_filter = (RtFilter)item.tag; [self saveSettings]; [self applySettings]; }
 - (void)pickScale:(NSMenuItem *)item { rt_settings.scale_mode = (RtScaleMode)item.tag; [self saveSettings]; [self applySettings]; }
+- (void)saveState:(id)sender { rt_savestate_request(true, _slot); }
+- (void)loadState:(id)sender { rt_savestate_request(false, _slot); }
+- (void)pickSlot:(NSMenuItem *)item { _slot = (int)item.tag; }
 - (void)toggleFPS:(id)sender { rt_settings.show_fps = !rt_settings.show_fps; [self saveSettings]; }
 - (void)toggleFullScreen:(id)sender { [self.window toggleFullScreen:sender]; }
 

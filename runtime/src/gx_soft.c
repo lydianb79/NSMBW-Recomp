@@ -1436,3 +1436,18 @@ void rt_gx_soft_init(int threads) {
     for (int i = 0; i < EFB_W * EFB_H; i++) { g_efb[i] = 0xFF000000u; g_zbuf[i] = 1.0f; }
     rt_gx_backend = &k_soft;
 }
+
+/* save states: TMEM palettes, TEV constants and the GPU-side EFB copy table;
+ * decoded textures are dropped on load (guest memory changed under them) */
+void rt_gx_soft_ss_register(void) {
+    rt_ss_add(g_tmem, sizeof g_tmem);
+    rt_ss_add(g_konst, sizeof g_konst); rt_ss_add(g_tevreg, sizeof g_tevreg); rt_ss_add(g_konst_bp, sizeof g_konst_bp);
+    rt_ss_add(g_copies, sizeof g_copies);
+}
+void rt_gx_soft_ss_loaded(void) {
+    for (int i = 0; i < TEX_CACHE; i++) { free(g_tex[i].rgba); g_tex[i].rgba = NULL; g_tex[i].addr = 0; }
+    for (int i = 0; i < EFB_COPIES; i++) g_copies[i].checked_frame = 0;   /* re-check against guest memory */
+    memset(g_map_last, 0, sizeof g_map_last);
+    g_tmem_gen++;
+    g_frame_no++;
+}

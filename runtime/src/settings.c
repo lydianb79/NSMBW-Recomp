@@ -36,6 +36,11 @@ void rt_settings_defaults(RtSettings *s) {
     s->aspect = RT_ASPECT_AUTO;
     s->texture_filter = RT_TEXFILTER_GAME;
     s->audio_volume = 80;
+    s->audio_mute = false;
+    s->audio_reverb = true;
+    s->remote_speaker = true;
+    s->remote_volume = 80;
+    s->audio_latency_ms = 60;
     s->app_icon = 6;                    /* Pixel Leap */
     s->anisotropy = 4;
     s->msaa = 1;
@@ -66,7 +71,7 @@ void rt_settings_defaults(RtSettings *s) {
 }
 
 #define RT_SETTINGS_FIELDS(X) \
-    X(internal_res, i) X(output_filter, e) X(scale_mode, e) X(aspect, e) X(texture_filter, e) X(renderer, i) X(audio_volume, i) X(app_icon, i) \
+    X(internal_res, i) X(output_filter, e) X(scale_mode, e) X(aspect, e) X(texture_filter, e) X(renderer, i) X(audio_volume, i) X(audio_mute, b) X(audio_reverb, b) X(remote_speaker, b) X(remote_volume, i) X(audio_latency_ms, i) X(app_icon, i) \
     X(anisotropy, i) X(msaa, i) X(widescreen, b) X(vsync, b) X(fullscreen, b) X(fps_limit, i) \
     X(crt_scanline, f) X(sharpness, f) X(show_fps, b) X(stick_deadzone, f) X(stick_as_dpad, b) X(rumble, b)
 

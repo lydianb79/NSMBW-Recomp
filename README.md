@@ -74,7 +74,10 @@ calls, `gdb`/`lldb` backtraces show the guest call chain directly as `f_XXXXXXXX
 - V-Sync, frame-rate limit (60 / 50 / 120 / unlimited), FPS counter, full screen (⌃⌘F)
 - App icon: pick one of ten bundled designs; the Dock icon changes immediately
 
-**Audio**: master volume (default 80 %).
+**Audio** (Settings → Audio)
+
+- Volume and mute; the game's reverb and effects on or off; Wii Remote speaker sounds on or off, with their own volume.
+- Latency 30–200 ms (raise it if you hear crackles).
 
 **Input** (Settings → Input)
 
@@ -107,6 +110,19 @@ NAND (saves, SYSCONF) is in the `nand/` folder next to it.
 - **Timing**: the VI clock (`runtime/src/rt_main.c`) locks to the display refresh reported by the
   app's display link; the AI clock paces audio DMA every 3 ms.
 
+## Save states
+
+**Game → Save State (⌘S)** and **Load State (⌘L)**, three slots (**⌘7 / ⌘8 / ⌘9** select one; the
+menu shows when each was saved). The request is carried out by the game at its next safe point:
+- Wii memory (MEM1, the module arena and MEM2), the hardware and graphics registers, open save files,
+  and every game thread's registers *and native stack* are captured.
+- On load each thread jumps back to where it was parked.
+
+Because the recompiled game's call frames live on native stacks, which are tied to the running
+process, **states are kept in memory and are lost when the app quits**; use the game's own save for
+progress you want to keep. A state uses about 100 MB. Loading does not rewind the game's save files
+on disk.
+
 ## App icons
 
 `platform/macos/icons/` holds ten original icon designs (`AppIcon-<name>.icns`, plus PNG
@@ -129,7 +145,8 @@ input), `RT_WAV=out.wav` (record the audio mix), `RT_SOFTWARE_RENDER` (app: use 
 `RT_CPU_EFB_COPIES`, `RT_XFB_READBACK` (app: write each frame to the guest XFB through a CPU readback, as before),
 `RT_UBERSHADER_ONLY` (app: draw everything with the general TEV shader, no specialised shaders), `RT_NO_REVERB`, `RT_NO_REMOTE_SPEAKER`, `RT_NO_AUDIO`, `RT_INTERNAL_RES=<1-8>` (overrides the
 setting), `RT_NO_VSYNC_LOCK` (free-running 60 Hz timer), `RT_SND_SAFETY` (report a sound finished after the game
-has waited 3 s for it; a debugging aid for audio bugs). A hang prints every
+has waited 3 s for it; a debugging aid for audio bugs). Headless runner: `RT_SS="save0@20,load0@30"` saves / loads
+states at the given seconds. A hang prints every
 guest thread's call stack.
 
 ## Known gaps / roadmap

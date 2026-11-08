@@ -29,6 +29,10 @@ static CVReturn display_tick(CVDisplayLinkRef link, const CVTimeStamp *now, cons
     CVDisplayLinkRef _link;
     Renderer *_renderer;
     CFTimeInterval _fpsStart;
+    NSString *_ssMsg;              /* save-state status, shown in the title for a few seconds */
+    CFTimeInterval _ssMsgUntil;
+    int _ssSeq;
+    NSString *_baseTitle;
     uint64_t _fpsFrames, _lastGameFrame;
 }
 
@@ -74,6 +78,12 @@ static CVReturn display_tick(CVDisplayLinkRef link, const CVTimeStamp *now, cons
     if (_link && sid) CVDisplayLinkSetCurrentCGDisplay(_link, (CGDirectDisplayID)sid.unsignedIntValue);
 }
 
+- (void)updateTitle {
+    NSString *t = _baseTitle ?: @"NSMBW Recomp";
+    if (_ssMsg) t = [t stringByAppendingFormat:@"  —  %@", _ssMsg];
+    self.window.title = t;
+}
+
 - (BOOL)acceptsFirstResponder { return YES; }
 - (BOOL)canBecomeKeyView { return YES; }
 
@@ -105,6 +115,17 @@ static CVReturn display_tick(CVDisplayLinkRef link, const CVTimeStamp *now, cons
 - (void)didPresentGameFrame:(uint64_t)frame {
     if (frame != _lastGameFrame) { _fpsFrames++; _lastGameFrame = frame; }
     CFTimeInterval now = CACurrentMediaTime();
+    char m[128];
+    int seq = rt_savestate_message(m, sizeof m);
+    if (seq != _ssSeq) {
+        _ssSeq = seq;
+        _ssMsg = [NSString stringWithUTF8String:m];
+        _ssMsgUntil = now + 2.5;
+        [self updateTitle];
+    } else if (_ssMsg && now > _ssMsgUntil) {
+        _ssMsg = nil;
+        [self updateTitle];
+    }
     if (_fpsStart == 0) _fpsStart = now;
     if (now - _fpsStart >= 1.0) {
         double fps = _fpsFrames / (now - _fpsStart);
@@ -116,13 +137,14 @@ static CVReturn display_tick(CVDisplayLinkRef link, const CVTimeStamp *now, cons
             if (rt_metal_gx_stats(&gpu, &gx, &wait, &frames)) {
                 if (last_frames) fps = (double)(frames - last_frames) / (now - _fpsStart);
                 last_frames = frames;
-                title = [NSString stringWithFormat:@"NSMBW Recomp — %.0f fps · GPU %.1f ms · GX %.1f ms · wait %.1f ms",
-                                                   fps, gpu, gx, wait];
+                (void)gx; (void)wait;
+                title = [NSString stringWithFormat:@"NSMBW Recomp — %.0f fps · GPU %.1f ms", fps, gpu];
             } else {
                 title = [NSString stringWithFormat:@"NSMBW Recomp — %.0f fps", fps];
             }
         }
-        self.window.title = title;
+        _baseTitle = title;
+        [self updateTitle];
         _fpsFrames = 0;
         _fpsStart = now;
     }

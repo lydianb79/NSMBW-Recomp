@@ -469,3 +469,36 @@ void rt_ios_init(void) {
     nand_init();
     disc_map_build();
 }
+
+/* save states: IPC registers and queued replies are plain data; open NAND
+ * files are saved as (path, position) and reopened on load */
+void rt_ios_ss_register(void) {
+    rt_ss_add(&g_ppcmsg, sizeof g_ppcmsg); rt_ss_add(&g_ppcctrl, sizeof g_ppcctrl);
+    rt_ss_add(&g_armmsg, sizeof g_armmsg); rt_ss_add(&g_armctrl, sizeof g_armctrl);
+    rt_ss_add(g_pending, sizeof g_pending); rt_ss_add(&g_npending, sizeof g_npending);
+}
+typedef struct { int type; long pos; char path[512]; } FdSave;
+size_t rt_ios_ss_size(void) { return sizeof(FdSave) * 32; }
+void rt_ios_ss_save(void *buf) {
+    FdSave *o = buf;
+    for (int i = 0; i < 32; i++) {
+        o[i].type = g_fd[i].type;
+        o[i].pos = g_fd[i].f ? ftell(g_fd[i].f) : 0;
+        memcpy(o[i].path, g_fd[i].path, sizeof o[i].path);
+    }
+}
+void rt_ios_ss_load(const void *buf) {
+    const FdSave *in = buf;
+    for (int i = 0; i < 32; i++) {
+        if (g_fd[i].f) fclose(g_fd[i].f);
+        memset(&g_fd[i], 0, sizeof g_fd[i]);
+        g_fd[i].type = in[i].type;
+        memcpy(g_fd[i].path, in[i].path, sizeof g_fd[i].path);
+        if (in[i].type == DEV_FILE) {
+            char hp[1600]; nand_path(in[i].path, hp, sizeof hp);
+            g_fd[i].f = fopen(hp, "r+b");
+            if (!g_fd[i].f) g_fd[i].f = fopen(hp, "rb");
+            if (g_fd[i].f) fseek(g_fd[i].f, in[i].pos, SEEK_SET);
+        }
+    }
+}

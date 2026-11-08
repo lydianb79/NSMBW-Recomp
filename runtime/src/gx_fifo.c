@@ -285,14 +285,29 @@ static void gpu_consume(void) {
     }
 }
 
+static _Atomic int g_gpu_busy;
 static void *gpu_thread(void *arg) {
     (void)arg;
     for (;;) {
         uint32_t tail = atomic_load_explicit(&g_ring_tail, memory_order_relaxed);
         if (tail == atomic_load_explicit(&g_ring_head, memory_order_acquire)) { usleep(50); continue; }
+        atomic_store(&g_gpu_busy, 1);
         gpu_consume();
+        atomic_store(&g_gpu_busy, 0);
     }
     return NULL;
+}
+
+/* wait until everything written to the FIFO has been processed */
+void rt_gx_idle(void) {
+    if (!g_async) return;
+    while (atomic_load(&g_ring_tail) != atomic_load(&g_ring_head) || atomic_load(&g_gpu_busy)) usleep(100);
+}
+
+void rt_gx_ss_register(void) {
+    rt_ss_add(&rt_gx, sizeof rt_gx);
+    rt_ss_add(g_buf, sizeof g_buf);
+    rt_ss_add(&g_len, sizeof g_len);
 }
 
 static inline void ring_put(const uint8_t *b, uint32_t n) {
