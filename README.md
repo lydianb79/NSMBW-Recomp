@@ -8,11 +8,13 @@ for the Wii's hardware and operating system.
 No game code or assets are included or distributed. Everything game-specific is generated
 locally from the disc you supply.
 
-> **Status: playable.** The recompiled game boots, plays the title and opening cutscene, reaches
-> the world map and loads levels. Rendering runs on Metal (TEV uber-shader, indirect texturing,
-> GPU-side EFB copies), audio is mixed from the game's AX voices (ADPCM/PCM, sample-rate
-> conversion, envelopes, the game's own reverb on the aux buses, the Wii Remote speaker stream) and
-> played through Core Audio, and save data persists in a virtual NAND.
+> **Status: playable at 60 fps.** The recompiled game boots, plays the title and opening cutscene,
+> reaches the world map and plays levels. Rendering runs on Metal at up to 8× internal resolution
+> (a specialised shader per TEV setup, indirect texturing, GPU-side EFB copies, MSAA, anisotropic
+> filtering), with the frame clock locked to the display. Audio is mixed from the game's AX voices
+> (ADPCM/PCM, sample-rate conversion, envelopes, the game's own reverb, the Wii Remote speaker) and
+> played through Core Audio. Save data persists in a virtual NAND, and save states (3 slots) work
+> within a session.
 
 ## What's here
 
@@ -61,6 +63,21 @@ Use `-vv` to trace every IPC request, context switch and interrupt. Hangs and cr
 guest thread's registers and call stack (the guest back-chain). Because guest calls are host C
 calls, `gdb`/`lldb` backtraces show the guest call chain directly as `f_XXXXXXXX` frames.
 
+## Menus and shortcuts
+
+| Menu | Item | Shortcut |
+|---|---|---|
+| NSMBW Recomp | Settings… | ⌘, |
+| NSMBW Recomp | Minimise (hidden item) | ⌘M |
+| View | Toggle Full Screen | ⌃⌘F |
+| View | Output filter: Nearest … LCD grid | ⌘1 … ⌘6 |
+| View | Show FPS, Scaling | — |
+| Game | Save State / Load State | ⌘S / ⌘L |
+| Game | Slot 1 / 2 / 3 | ⌘7 / ⌘8 / ⌘9 |
+
+With **Show FPS** on, the title bar shows the frames the game finishes per second and the GPU time
+per frame (16.7 ms is the budget for 60 fps). Save-state messages appear there for a few seconds.
+
 ## Settings
 
 **Graphics** (Settings → Graphics, or the View menu)
@@ -69,7 +86,7 @@ calls, `gdb`/`lldb` backtraces show the guest call chain directly as `f_XXXXXXXX
 - Scaling: Fit (keep aspect), Integer, Stretch
 - Aspect ratio: Auto (follows the game), 4:3, 16:9. **Widescreen 16:9** (default on) tells the game, through SYSCONF, to render in 16:9; turn it off for 4:3. Takes effect at the next start.
 - Renderer: Metal (default) or the CPU software renderer
-- Internal resolution 1×–8× (default 2×): the Metal renderer draws the game at N × 640×528 and presents that image directly. Render-to-texture effects are made at the same resolution. Scale2x, CRT and LCD filters work on native pixels, so they show the 1× image.
+- Internal resolution 1×–8× (default 2×; 3× holds 60 fps on an M2): the Metal renderer draws the game at N × 640×528 and presents that image directly. Render-to-texture effects are made at the same resolution. Scale2x, CRT and LCD filters work on native pixels, so they show the 1× image.
 - Anti-aliasing: 2× / 4× MSAA. Anisotropic filtering 2×–16× (adds mipmaps to the game's textures). Texture filtering override (as the game sets it / nearest / linear).
 - V-Sync, frame-rate limit (60 / 50 / 120 / unlimited), FPS counter, full screen (⌃⌘F)
 - App icon: pick one of ten bundled designs; the Dock icon changes immediately
@@ -159,6 +176,12 @@ guest thread's call stack.
 3. Only the Metal renderer has the enhancements; the CPU renderer stays at 1×.
 
 ### Recently fixed
+
+- Performance: the general TEV "uber" shader picked every input at run time and cost 22–31 ms of
+  GPU time per frame at 2×–3×. Each TEV setup now gets its own generated shader, compiled in the
+  background (2.5–7 ms per frame at 3× on an M2). Display copies stay on the GPU, so the game no
+  longer waits for the GPU at the end of every frame.
+- Save states and an Audio settings tab; the Window menu is gone.
 
 - One-shot voices now end the way AXWii ends them: the voice stops and its play position jumps to
   the loop address. nw4r::snd points that at a silent buffer and checks for it to decide that a
