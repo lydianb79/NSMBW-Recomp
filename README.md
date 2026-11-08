@@ -42,6 +42,15 @@ The script extracts the disc to `game/`, links and recompiles into `build/`, com
 (a few minutes on Apple Silicon; the generated C is about 80 MB) and copies the app to `dist/`.
 Re-run with `--skip-extract` to reuse `game/`.
 
+After the first build, double-click **`build_and_log.command`** in Finder to rebuild. It reuses
+the generated C in `build/`, rebuilds the app, copies it to `dist/`, refreshes the app icon in
+Finder and the Dock, writes `build_log.txt`, and runs a 30-second headless check
+(`headless_log.txt`). If you move the project folder, CMake's cache no longer matches the new
+location; the script notices, sets the old `build/cmake` aside as `build/cmake.old.<time>` and
+starts a fresh (full) compile. You can delete the old folder afterwards.
+
+If the Dock or Finder still shows an old icon after a rebuild, run `killall Dock Finder`.
+
 A headless runner is built alongside the app, which is handy for working on the runtime:
 
 ```sh
@@ -59,8 +68,12 @@ calls, `gdb`/`lldb` backtraces show the guest call chain directly as `f_XXXXXXXX
 - Output filter: Nearest, Bilinear, Sharp bilinear (crisp pixels at non-integer scales), Scale2x (EPX), CRT (scanlines and aperture mask, adjustable strength), LCD grid
 - Scaling: Fit (keep aspect), Integer, Stretch
 - Aspect ratio: Auto, 4:3, 16:9; widescreen hack
-- Internal resolution 1×–8×, texture filtering override, anisotropic filtering, MSAA. These are stored now and used by the GX renderer once it exists.
+- Renderer: Metal (default) or the CPU software renderer
+- Internal resolution 1×–8×, texture filtering override, anisotropic filtering, MSAA. Stored, but the Metal renderer currently draws at 1× (see roadmap).
 - V-Sync, frame-rate limit (60 / 50 / 120 / unlimited), FPS counter, full screen (⌃⌘F)
+- App icon: pick one of ten bundled designs; the Dock icon changes immediately
+
+**Audio**: master volume (default 80 %).
 
 **Input** (Settings → Input)
 
@@ -85,6 +98,20 @@ NAND (saves, SYSCONF) is in the `nand/` folder next to it.
 - **Graphics**: a GX FIFO decoder feeds a front end that does vertex transform, lighting and
   texgen on the CPU; triangles go to Metal (`platform/macos/MetalGX.m`) or the portable software
   rasteriser (`runtime/src/gx_soft.c`, used by the headless runner).
+
+## App icons
+
+`platform/macos/icons/` holds ten original icon designs (`AppIcon-<name>.icns`, plus PNG
+previews and `variants_sheet.png` / `designs_sheet.png`): day, sunset, night, winter, autumn,
+arcade_chip, **pixel_leap** (default), neon, paper, minimal. All of them are bundled into the
+app. The one Finder shows for the `.app` file is set at configure time:
+
+```sh
+cmake -S . -B build/cmake -DNSMBW_ICON=neon
+```
+
+The Dock icon while the game runs follows Settings → Graphics → App icon. The icons are drawn by
+`tools/make_icon_variants.py` and `tools/make_icon_designs.py` (Python + Pillow).
 
 ## Debugging
 
