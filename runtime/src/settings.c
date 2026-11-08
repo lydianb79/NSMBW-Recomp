@@ -64,7 +64,7 @@ void rt_settings_defaults(RtSettings *s) {
 }
 
 #define RT_SETTINGS_FIELDS(X) \
-    X(internal_res, i) X(output_filter, e) X(scale_mode, e) X(aspect, e) X(texture_filter, e) X(renderer, i) X(audio_volume, i) \
+    X(internal_res, i) X(output_filter, e) X(scale_mode, e) X(aspect, e) X(texture_filter, e) X(renderer, i) X(audio_volume, i) X(app_icon, i) \
     X(anisotropy, i) X(msaa, i) X(widescreen_hack, b) X(vsync, b) X(fullscreen, b) X(fps_limit, i) \
     X(crt_scanline, f) X(sharpness, f) X(show_fps, b) X(stick_deadzone, f) X(stick_as_dpad, b)
 

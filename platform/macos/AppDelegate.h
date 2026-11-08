@@ -9,4 +9,5 @@
 + (NSString *)settingsPath;
 - (void)saveSettings;
 - (void)applySettings;
+- (void)applyAppIcon;
 @end

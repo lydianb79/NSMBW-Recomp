@@ -57,17 +57,29 @@ static void app_fatal(const char *msg) {
 
 - (void)applySettings {
     [self.gameView settingsChanged];
+    [self applyAppIcon];
     BOOL fs = (self.window.styleMask & NSWindowStyleMaskFullScreen) != 0;
     if (fs != rt_settings.fullscreen) [self.window toggleFullScreen:nil];
 }
 
 #pragma mark - launch
 
+/* Dock icon from the selected variant (all variants are in the bundle's Resources). */
+- (void)applyAppIcon {
+    static NSString *const names[] = { @"day", @"sunset", @"night", @"winter", @"autumn" };
+    int i = rt_settings.app_icon;
+    if (i < 0 || i > 4) i = 0;
+    NSString *path = [[NSBundle mainBundle] pathForResource:[@"AppIcon-" stringByAppendingString:names[i]] ofType:@"icns"];
+    NSImage *img = path ? [[NSImage alloc] initWithContentsOfFile:path] : nil;
+    if (img) NSApp.applicationIconImage = img;
+}
+
 - (void)applicationDidFinishLaunching:(NSNotification *)note {
     rt_set_log(app_log);
     rt_set_fatal_hook(app_fatal);
     rt_settings_defaults(&rt_settings);
     rt_settings_load(&rt_settings, [AppDelegate settingsPath].fileSystemRepresentation);
+    [self applyAppIcon];
 
     [self buildMenu];
     NSRect frame = NSMakeRect(0, 0, 1280, 720);

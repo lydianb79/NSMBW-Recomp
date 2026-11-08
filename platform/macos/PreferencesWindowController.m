@@ -26,7 +26,7 @@ static NSString *const kButtonLabels[RT_BTN_COUNT] = {
 }
 
 - (instancetype)initWithOwner:(AppDelegate *)owner {
-    NSWindow *w = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 620, 680)
+    NSWindow *w = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 620, 716)
                                               styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
                                                 backing:NSBackingStoreBuffered defer:NO];
     w.title = @"Settings";
@@ -102,15 +102,18 @@ static NSTextField *label(NSString *s, NSRect r) {
     self.window.contentView = tabs;
 }
 
-enum { G_RENDERER = 30, G_RES = 1, G_FILTER, G_SCALE, G_ASPECT, G_TEX, G_ANISO, G_MSAA, G_FPS,
+enum { G_RENDERER = 30, G_ICON = 31, G_RES = 1, G_FILTER, G_SCALE, G_ASPECT, G_TEX, G_ANISO, G_MSAA, G_FPS,
        G_VSYNC = 20, G_WIDE, G_SHOWFPS, G_FULL, S_SCAN = 40, S_SHARP, S_VOLUME };
 
 - (NSView *)graphicsView {
-    NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 580, 652)];
-    CGFloat y = 602, L = 20, W = 190, X = 220, PW = 240, dy = 36;
+    NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 580, 688)];
+    CGFloat y = 638, L = 20, W = 190, X = 220, PW = 240, dy = 36;
     [v addSubview:label(@"Renderer (needs restart):", NSMakeRect(L, y, W, 20))];
     [self popup:@[ @"Metal (GPU)", @"Software (CPU)" ] at:NSMakeRect(X, y - 4, PW, 26)
        selected:rt_settings.renderer == 1 ? 1 : 0 tag:G_RENDERER in:v]; y -= dy;
+    [v addSubview:label(@"App icon:", NSMakeRect(L, y, W, 20))];
+    [self popup:@[ @"Day", @"Sunset", @"Night", @"Winter", @"Autumn" ] at:NSMakeRect(X, y - 4, PW, 26)
+       selected:rt_settings.app_icon tag:G_ICON in:v]; y -= dy;
     NSArray *res = @[ @"1× native (640×528)", @"2× (720p)", @"3× (1080p)", @"4× (1440p)", @"5×", @"6× (4K)", @"7×", @"8× (5K)" ];
     [v addSubview:label(@"Internal resolution:", NSMakeRect(L, y, W, 20))];
     [self popup:res at:NSMakeRect(X, y - 4, PW, 26) selected:rt_settings.internal_res - 1 tag:G_RES in:v]; y -= dy;
@@ -161,6 +164,7 @@ enum { G_RENDERER = 30, G_RES = 1, G_FILTER, G_SCALE, G_ASPECT, G_TEX, G_ANISO, 
     NSInteger i = p.indexOfSelectedItem;
     switch (p.tag) {
         case G_RENDERER: rt_settings.renderer = (int)i; break;
+        case G_ICON: rt_settings.app_icon = (int)i; break;
         case G_RES: rt_settings.internal_res = (int)i + 1; break;
         case G_FILTER: rt_settings.output_filter = (RtFilter)i; break;
         case G_SCALE: rt_settings.scale_mode = (RtScaleMode)i; break;

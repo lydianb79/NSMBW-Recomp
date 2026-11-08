@@ -38,6 +38,7 @@ typedef struct {
     RtTexFilter texture_filter;
     int         renderer;           /* 0 = Metal (GPU), 1 = software (CPU); applied at start-up */
     int         audio_volume;       /* 0..100 */
+    int         app_icon;           /* 0 day, 1 sunset, 2 night, 3 winter, 4 autumn */
     int         anisotropy;         /* 1,2,4,8,16 */
     int         msaa;               /* 1,2,4 */
     bool        widescreen_hack;

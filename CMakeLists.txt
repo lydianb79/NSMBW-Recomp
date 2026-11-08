@@ -76,15 +76,21 @@ if(APPLE)
   set(APP_SHADERS platform/macos/Shaders.metal)
   set_source_files_properties(${APP_SHADERS} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
 
-  set(APP_ICON platform/macos/AppIcon.icns)
-  set_source_files_properties(${APP_ICON} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
-  add_executable(NSMBWRecomp MACOSX_BUNDLE ${APP_SOURCES} ${APP_SHADERS} ${APP_ICON})
+  # All icon variants are bundled (Preferences > Graphics > App icon switches the Dock icon at run
+  # time); NSMBW_ICON picks the one Finder shows: day, sunset, night, winter or autumn.
+  set(NSMBW_ICON "day" CACHE STRING "Default app icon variant (day, sunset, night, winter, autumn)")
+  set(APP_ICONS
+    platform/macos/icons/AppIcon-day.icns platform/macos/icons/AppIcon-sunset.icns
+    platform/macos/icons/AppIcon-night.icns platform/macos/icons/AppIcon-winter.icns
+    platform/macos/icons/AppIcon-autumn.icns)
+  set_source_files_properties(${APP_ICONS} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+  add_executable(NSMBWRecomp MACOSX_BUNDLE ${APP_SOURCES} ${APP_SHADERS} ${APP_ICONS})
   set_target_properties(NSMBWRecomp PROPERTIES
     OUTPUT_NAME "NSMBW Recomp"
     MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/platform/macos/Info.plist.in"
     MACOSX_BUNDLE_GUI_IDENTIFIER "com.local.nsmbw-recomp"
     MACOSX_BUNDLE_BUNDLE_NAME "NSMBW Recomp"
-    MACOSX_BUNDLE_ICON_FILE "AppIcon"
+    MACOSX_BUNDLE_ICON_FILE "AppIcon-${NSMBW_ICON}"
     MACOSX_BUNDLE_SHORT_VERSION_STRING "0.1.0"
     MACOSX_BUNDLE_BUNDLE_VERSION "1"
     XCODE_ATTRIBUTE_CLANG_ENABLE_OBJC_ARC YES)
