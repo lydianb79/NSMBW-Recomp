@@ -78,7 +78,7 @@ if(APPLE)
 
   # All icon variants are bundled (Preferences > Graphics > App icon switches the Dock icon at run
   # time); NSMBW_ICON picks the one Finder shows (see platform/macos/icons/).
-  set(NSMBW_ICON "day" CACHE STRING "Default app icon (day, sunset, night, winter, autumn, arcade_chip, pixel_leap, neon, paper, minimal)")
+  set(NSMBW_ICON "pixel_leap" CACHE STRING "Default app icon (day, sunset, night, winter, autumn, arcade_chip, pixel_leap, neon, paper, minimal)")
   set(APP_ICONS
     platform/macos/icons/AppIcon-day.icns platform/macos/icons/AppIcon-sunset.icns
     platform/macos/icons/AppIcon-night.icns platform/macos/icons/AppIcon-winter.icns

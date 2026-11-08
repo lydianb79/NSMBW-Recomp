@@ -36,6 +36,7 @@ void rt_settings_defaults(RtSettings *s) {
     s->aspect = RT_ASPECT_AUTO;
     s->texture_filter = RT_TEXFILTER_GAME;
     s->audio_volume = 80;
+    s->app_icon = 6;                    /* Pixel Leap */
     s->anisotropy = 4;
     s->msaa = 1;
     s->widescreen_hack = false;
