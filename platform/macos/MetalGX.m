@@ -251,7 +251,16 @@ static id<MTLDevice> g_dev;
 static id<MTLCommandQueue> g_queue;
 static id<MTLLibrary> g_lib;
 static id<MTLTexture> g_efb, g_depth, g_white;
-static id<MTLBuffer> g_vbuf, g_ibuf;
+/* vertex/index data: a ring of buffers, one per submitted command buffer, so
+ * the CPU can fill the next while the GPU still reads the previous ones */
+#define RING 3
+static id<MTLBuffer> g_vbufs[RING], g_ibufs[RING];
+static id<MTLCommandBuffer> g_ring_cb[RING];
+static int g_ring;
+#define g_vbuf g_vbufs[g_ring]
+#define g_ibuf g_ibufs[g_ring]
+static volatile uint64_t g_done_pass;     /* highest pass whose command buffer has completed */
+static id<MTLCommandBuffer> g_last_disp_cb;
 static uint32_t g_voff, g_ioff;
 static id<MTLCommandBuffer> g_cb;
 static id<MTLRenderCommandEncoder> g_enc;
@@ -276,8 +285,9 @@ static id<MTLTexture> g_efb1;         /* 1x CPU-readable copy when g_scale > 1 *
 #define DISP_RING 3
 typedef struct { id<MTLTexture> tex; uint32_t xfb, w, h; uint64_t seq; } DispCopy;
 static DispCopy g_disp[DISP_RING];
-static int g_disp_next, g_disp_pending = -1;
+static int g_disp_next;
 static uint64_t g_disp_seq;
+static volatile bool g_display_active;   /* display copies go to the presenter, not the XFB */
 static NSLock *g_disp_lock;
 
 static MTLBlendFactor gx_factor(int f, bool is_src, bool no_alpha) {
@@ -367,8 +377,8 @@ static id<MTLTexture> upload(const RtGpuTex *t) {
     if (g_mtex_tex[slot] && e->hash == t->hash && e->w == t->w && e->h == t->h && e->mips == mips) {
         e->used_pass = g_pass; return g_mtex_tex[slot];
     }
-    /* never overwrite a texture that queued (uncommitted) draws still sample */
-    if (!g_mtex_tex[slot] || e->w != t->w || e->h != t->h || e->mips != mips || e->used_pass == g_pass) {
+    /* never overwrite a texture that queued or in-flight draws still sample */
+    if (!g_mtex_tex[slot] || e->w != t->w || e->h != t->h || e->mips != mips || e->used_pass > g_done_pass) {
         MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                                                                      width:t->w height:t->h mipmapped:mips ? YES : NO];
         td.usage = MTLTextureUsageShaderRead;
@@ -437,25 +447,40 @@ static void end_pass(void) {
     g_enc = nil;
 }
 
-static void flush(void) {
+/* Commit the queued work. wait: block until the GPU is done (CPU readbacks).
+ * publish >= 0: display copy slot to hand to the presenter once complete. */
+static void submit(bool wait, int publish) {
     if (g_enc || g_cb) {
         if (!g_cb) g_cb = [g_queue commandBuffer];
         if (g_enc) [g_enc endEncoding];
         g_enc = nil;
-        if (g_efb.storageMode == MTLStorageModeManaged) {   /* Intel: make the GPU copy visible to the CPU */
+        if (wait && g_efb.storageMode == MTLStorageModeManaged) {   /* Intel: make the GPU copy visible to the CPU */
             id<MTLBlitCommandEncoder> b = [g_cb blitCommandEncoder];
             [b synchronizeResource:g_efb];
             [b endEncoding];
         }
+        uint64_t pass = g_pass;
+        [g_cb addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+            if (cb.error) rt_log(0, "metal: command buffer error: %s", cb.error.localizedDescription.UTF8String);
+            if (pass > g_done_pass) g_done_pass = pass;            /* completions arrive in order */
+            if (publish >= 0) {
+                [g_disp_lock lock];
+                g_disp[publish].seq = ++g_disp_seq;
+                [g_disp_lock unlock];
+            }
+        }];
         [g_cb commit];
-        [g_cb waitUntilCompleted];
-        if (g_cb.error) rt_log(0, "metal: command buffer error: %s", g_cb.error.localizedDescription.UTF8String);
+        g_ring_cb[g_ring] = g_cb;
+        if (wait) [g_cb waitUntilCompleted];
         g_cb = nil;
         g_flushes++;
+        g_ring = (g_ring + 1) % RING;
+        if (g_ring_cb[g_ring]) { [g_ring_cb[g_ring] waitUntilCompleted]; g_ring_cb[g_ring] = nil; }
     }
     g_pass++;
     g_voff = g_ioff = 0;
 }
+static void flush(void) { submit(true, -1); }
 
 static void set_scissor(int x0, int y0, int x1, int y1) {
     if (x0 < 0) x0 = 0;
@@ -567,7 +592,7 @@ static void mtl_draw(const RtGpuDraw *d) {
     @autoreleasepool {
         uint32_t vbytes = d->nv * (uint32_t)sizeof(Vtx), ibytes = d->ntri * 3u * 4u;
         if (vbytes > VBUF_SIZE || ibytes > IBUF_SIZE) return;
-        if (g_voff + vbytes > VBUF_SIZE || g_ioff + ibytes > IBUF_SIZE) flush();
+        if (g_voff + vbytes > VBUF_SIZE || g_ioff + ibytes > IBUF_SIZE) submit(false, -1);
         begin_pass();
         uint32_t key = (uint32_t)d->blend_on | (uint32_t)d->blend_sub << 1 | (uint32_t)(d->src_f & 7) << 2 |
                        (uint32_t)(d->dst_f & 7) << 5 | (uint32_t)d->cupd << 8 |
@@ -655,13 +680,6 @@ static void mtl_readback(int x, int y, int w, int h, uint32_t *dst, int stride) 
             src = g_efb1;
         }
         flush();
-        /* a display copy queued by mtl_display is complete now: publish it */
-        if (g_disp_pending >= 0) {
-            [g_disp_lock lock];
-            g_disp[g_disp_pending].seq = ++g_disp_seq;
-            [g_disp_lock unlock];
-            g_disp_pending = -1;
-        }
         if (g_efb_ready && w > 0 && h > 0) {
             if (stride == w) {
                 [src getBytes:dst bytesPerRow:(NSUInteger)w * 4 fromRegion:MTLRegionMake2D((NSUInteger)x, (NSUInteger)y, (NSUInteger)w, (NSUInteger)h) mipmapLevel:0];
@@ -671,9 +689,6 @@ static void mtl_readback(int x, int y, int w, int h, uint32_t *dst, int stride) 
                        fromRegion:MTLRegionMake2D((NSUInteger)x, (NSUInteger)(y + r), (NSUInteger)w, 1) mipmapLevel:0];
             }
         }
-        static uint64_t n;
-        if ((++n % 600) == 0) rt_log(1, "metal: %llu draws, %llu submits, %llu GPU texture copies",
-                                     (unsigned long long)g_draws, (unsigned long long)g_flushes, (unsigned long long)g_copies_gpu);
         apply_settings();      /* nothing is queued here: safe point to rebuild targets */
     }
 }
@@ -713,9 +728,16 @@ static int mtl_copy_tex(int x, int y, int w, int h, int half, int fmt, int no_al
     }
 }
 
-/* EFB -> XFB: keep a full-resolution copy for the presenter */
-static void mtl_display(int x, int y, int w, int h, uint32_t xfb) {
-    if (g_scale <= 1 || w <= 0 || h <= 0) return;      /* at 1x the XFB itself is just as good */
+/* EFB -> XFB, kept on the GPU: the EFB rectangle is copied (at the internal
+ * resolution) into a display texture that the presenter shows for this XFB
+ * address. Nothing is read back and the CPU does not wait for the GPU: the
+ * frame's work is committed and the game goes on with the next frame (at most
+ * one frame ahead). Returns 1 when handled, so the front end skips the
+ * readback and YUV encoding. */
+static int mtl_display(int x, int y, int w, int h, uint32_t xfb) {
+    static int cpu_xfb = -1;
+    if (cpu_xfb < 0) cpu_xfb = getenv("RT_XFB_READBACK") != NULL;
+    if (cpu_xfb || w <= 0 || h <= 0) return 0;
     @autoreleasepool {
         int i = g_disp_next;
         g_disp_next = (g_disp_next + 1) % DISP_RING;
@@ -726,11 +748,11 @@ static void mtl_display(int x, int y, int w, int h, uint32_t xfb) {
         [g_disp_lock unlock];
         if (!t || t.width != pw || t.height != ph) {
             MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
-                                                                                          width:pw height:ph mipmapped:YES];
+                                                                                          width:pw height:ph mipmapped:g_scale > 1];
             td.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
             td.storageMode = MTLStorageModePrivate;
             t = [g_dev newTextureWithDescriptor:td];
-            if (!t) return;
+            if (!t) return 0;
         }
         end_pass();
         id<MTLBlitCommandEncoder> b = [g_cb blitCommandEncoder];
@@ -745,13 +767,24 @@ static void mtl_display(int x, int y, int w, int h, uint32_t xfb) {
         g_disp[i].xfb = xfb & 0x1FFFFFFFu;
         g_disp[i].w = (uint32_t)w; g_disp[i].h = (uint32_t)h;
         [g_disp_lock unlock];
-        g_disp_pending = i;
+        /* keep the CPU at most one frame ahead of the GPU */
+        id<MTLCommandBuffer> prev = g_last_disp_cb;
+        g_last_disp_cb = g_cb;
+        submit(false, i);
+        if (prev) [prev waitUntilCompleted];
+        g_display_active = true;
+        static uint64_t n;
+        if ((++n % 600) == 0) rt_log(1, "metal: %llu draws, %llu submits, %llu GPU texture copies",
+                                     (unsigned long long)g_draws, (unsigned long long)g_flushes, (unsigned long long)g_copies_gpu);
+        apply_settings();      /* nothing is queued here: safe point to rebuild targets */
+        return 1;
     }
 }
 
 static const RtGpuSink k_metal = { mtl_draw, mtl_clear, mtl_readback, mtl_copy_tex, mtl_display };
 
 id<MTLDevice> rt_metal_gx_device(void) { return g_dev; }
+bool rt_metal_gx_display_active(void) { return g_display_active; }
 
 id<MTLTexture> rt_metal_gx_frame(uint32_t xfb, uint32_t *w, uint32_t *h) {
     if (!g_disp_lock) return nil;
@@ -765,9 +798,6 @@ id<MTLTexture> rt_metal_gx_frame(uint32_t xfb, uint32_t *w, uint32_t *h) {
             if (w) *w = g_disp[i].w;
             if (h) *h = g_disp[i].h;
         }
-    /* only use it while the renderer is still scaling (a copy made before the
-     * user switched back to 1x would otherwise stay on screen) */
-    if (best && g_scale <= 1) best = nil;
     [g_disp_lock unlock];
     return best;
 }
@@ -795,8 +825,11 @@ bool rt_metal_gx_install(void) {
         uint32_t white = 0xFFFFFFFFu;
         [g_white replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 withBytes:&white bytesPerRow:4];
 
-        g_vbuf = [g_dev newBufferWithLength:VBUF_SIZE options:MTLResourceStorageModeShared];
-        g_ibuf = [g_dev newBufferWithLength:IBUF_SIZE options:MTLResourceStorageModeShared];
+        for (int r = 0; r < RING; r++) {
+            g_vbufs[r] = [g_dev newBufferWithLength:VBUF_SIZE options:MTLResourceStorageModeShared];
+            g_ibufs[r] = [g_dev newBufferWithLength:IBUF_SIZE options:MTLResourceStorageModeShared];
+            if (!g_vbufs[r] || !g_ibufs[r]) { rt_log(0, "metal: buffer allocation failed"); return false; }
+        }
 
         g_copy_tex = [NSMutableDictionary dictionary];
         {

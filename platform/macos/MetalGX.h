@@ -17,4 +17,7 @@ id<MTLDevice> rt_metal_gx_device(void);
  * resolution above 1x), or nil: then present the XFB itself. *w / *h receive
  * the image size in native (1x) EFB pixels. */
 id<MTLTexture> rt_metal_gx_frame(uint32_t xfb, uint32_t *w, uint32_t *h);
+/* true once display copies are kept on the GPU (the guest XFB is then not
+ * written; present rt_metal_gx_frame, or the last such image) */
+bool rt_metal_gx_display_active(void);
 #endif

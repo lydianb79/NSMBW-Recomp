@@ -59,6 +59,7 @@ void rt_gx_write8(uint8_t v);
 void rt_gx_write16(uint16_t v);
 void rt_gx_write32(uint32_t v);
 void rt_gx_copy_to_xfb(uint32_t dest, uint32_t w, uint32_t h);
+extern volatile int rt_xfb_on_gpu;   /* display copies are presented from GPU memory; the guest XFB is not written */
 
 /* video.c */
 void rt_video_vi_retrace(void);

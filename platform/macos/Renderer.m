@@ -19,6 +19,7 @@ typedef struct {
     id<MTLRenderPipelineState> _pipeline;
     id<MTLTexture> _frameTex;
     uint64_t _uploaded;
+    id<MTLTexture> _lastGpuFrame;
     uint32_t _texW, _texH;
 }
 
@@ -107,21 +108,24 @@ static MTLViewport viewport_for(CGSize out, uint32_t sw, uint32_t sh, bool wide)
     if (!rp || !drawable) return;
     id<MTLCommandBuffer> cb = [_queue commandBuffer];
     id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
-    /* Internal resolution above 1x: the GX renderer keeps a full-resolution
-     * copy of what it wrote to this XFB. The retro filters (Scale2x, CRT,
-     * LCD) work on native pixels, so they keep using the XFB. */
+    /* With the Metal GX renderer the game's frames stay on the GPU (at the
+     * internal resolution): show the one made for the XFB the VI is
+     * scanning out. The XFB in guest memory is not written then. The retro
+     * filters (Scale2x, CRT, LCD) work on the native pixel grid. */
     id<MTLTexture> src = _frameTex;
     bool retro = rt_settings.output_filter == RT_FILTER_SCALE2X || rt_settings.output_filter == RT_FILTER_CRT ||
                  rt_settings.output_filter == RT_FILTER_LCD;
-    if (have && !retro && _frameTex) {
+    if (have) {
         uint32_t lw = 0, lh = 0;
-        id<MTLTexture> hi = rt_metal_gx_frame(fr.xfb, &lw, &lh);
-        if (hi && hi.device == _device) src = hi;
+        id<MTLTexture> gpu = rt_metal_gx_frame(fr.xfb, &lw, &lh);
+        if (gpu && gpu.device == _device) _lastGpuFrame = gpu;
+        if (rt_metal_gx_display_active()) src = _lastGpuFrame;
     }
     if (src && _pipeline) {
         MTLViewport vp = viewport_for(view.drawableSize, _texW, _texH, have && fr.widescreen);
         [enc setViewport:vp];
-        PresentParams p = { (float)src.width, (float)src.height, (float)vp.width, (float)vp.height,
+        float sw = retro ? (float)_texW : (float)src.width, sh = retro ? (float)_texH : (float)src.height;
+        PresentParams p = { sw, sh, (float)vp.width, (float)vp.height,
                             (int32_t)rt_settings.output_filter, rt_settings.crt_scanline, rt_settings.sharpness, 0 };
         [enc setRenderPipelineState:_pipeline];
         [enc setFragmentTexture:src atIndex:0];

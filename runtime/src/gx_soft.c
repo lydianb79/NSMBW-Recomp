@@ -1281,12 +1281,13 @@ static void soft_copy_display(uint32_t xfb, uint32_t w, uint32_t h, uint32_t fla
     int x0 = xy & 0x3FF, y0 = (xy >> 10) & 0x3FF;
     uint32_t stride = (bp(0x4D) & 0x3FF) * 32;
     if (!stride) stride = w * 2;
+    int on_gpu = 0;
     if (g_gpu) {
         int rw = (int)w, rh = (int)h;
         if (x0 + rw > EFB_W) rw = EFB_W - x0;
         if (y0 + rh > EFB_H) rh = EFB_H - y0;
-        if (rw > 0 && rh > 0) {
-            if (g_gpu->display) g_gpu->display(x0, y0, rw, rh, xfb);
+        if (rw > 0 && rh > 0 && g_gpu->display && g_gpu->display(x0, y0, rw, rh, xfb)) on_gpu = rt_xfb_on_gpu = 1;
+        else if (rw > 0 && rh > 0) {
             g_gpu->readback(x0, y0, rw, rh, &g_efb[y0 * EFB_W + x0], EFB_W);
             int pf = bp(0x43) & 7;
             if (pf == 0 || pf == 2)              /* no alpha in the EFB: reads back as 1.0 */
@@ -1295,7 +1296,7 @@ static void soft_copy_display(uint32_t xfb, uint32_t w, uint32_t h, uint32_t fla
         }
     }
     uint8_t *dst = gmem(xfb);
-    for (uint32_t y = 0; y < h && y0 + (int)y < EFB_H; y++) {
+    for (uint32_t y = 0; !on_gpu && y < h && y0 + (int)y < EFB_H; y++) {
         uint8_t *row = dst + (size_t)y * stride;
         for (uint32_t x = 0; x + 1 < w && x0 + (int)x + 1 < EFB_W; x += 2) {
             uint32_t p0 = g_efb[(y0 + y) * EFB_W + x0 + x], p1 = g_efb[(y0 + y) * EFB_W + x0 + x + 1];

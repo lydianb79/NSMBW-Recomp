@@ -124,7 +124,8 @@ The Dock icon while the game runs follows Settings → Graphics → App icon. Th
 `build/cmake/nsmbw-headless build game -v -t <seconds>` runs the game without a window and prints
 per-second status. Useful environment variables: `RT_PRESS="a@6,two@9,right@12-15"` (scripted
 input), `RT_WAV=out.wav` (record the audio mix), `RT_SOFTWARE_RENDER` (app: use the CPU renderer),
-`RT_CPU_EFB_COPIES`, `RT_NO_REVERB`, `RT_NO_REMOTE_SPEAKER`, `RT_NO_AUDIO`, `RT_INTERNAL_RES=<1-8>` (overrides the
+`RT_CPU_EFB_COPIES`, `RT_XFB_READBACK` (app: write each frame to the guest XFB through a CPU readback, as before),
+`RT_NO_REVERB`, `RT_NO_REMOTE_SPEAKER`, `RT_NO_AUDIO`, `RT_INTERNAL_RES=<1-8>` (overrides the
 setting), `RT_NO_VSYNC_LOCK` (free-running 60 Hz timer), `RT_SND_SAFETY` (report a sound finished after the game
 has waited 3 s for it; a debugging aid for audio bugs). A hang prints every
 guest thread's call stack.

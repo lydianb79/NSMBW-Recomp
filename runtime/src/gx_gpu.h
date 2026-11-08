@@ -78,9 +78,10 @@ typedef struct {
      * if not handled, then the front end reads back and encodes on the CPU. */
     int (*copy_tex)(int x, int y, int w, int h, int half, int fmt, int no_alpha, uint32_t dest, uint32_t tw, uint32_t th);
     /* optional: the game copies this EFB rectangle to the XFB at guest address
-     * `xfb`. Lets the sink keep a full-resolution copy for presentation
-     * (internal resolution above 1x). Called before the matching readback. */
-    void (*display)(int x, int y, int w, int h, uint32_t xfb);
+     * `xfb`. A sink that presents the image itself (from GPU memory, at its
+     * internal resolution) returns 1; the front end then skips the readback
+     * and does not write the XFB. Returns 0 to get the normal XFB path. */
+    int (*display)(int x, int y, int w, int h, uint32_t xfb);
 } RtGpuSink;
 
 /* install (or remove, with NULL) the hardware rasteriser; call before rt_run */

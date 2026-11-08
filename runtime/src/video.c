@@ -17,6 +17,7 @@ static uint32_t *g_rgba[2];
 static uint32_t g_w, g_h, g_front;
 static uint64_t g_frame;
 static uint32_t g_pending_xfb, g_shown_xfb[2];
+volatile int rt_xfb_on_gpu;
 
 static inline uint8_t clamp8(int v) { return (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v); }
 
@@ -62,7 +63,7 @@ void rt_video_vi_retrace(void) {
         g_w = w; g_h = h;
     }
     pthread_mutex_unlock(&g_lock);
-    convert_xfb(xfb, w, h, stride, g_rgba[back]);
+    if (!rt_xfb_on_gpu) convert_xfb(xfb, w, h, stride, g_rgba[back]);   /* else the presenter shows the GPU copy */
     pthread_mutex_lock(&g_lock);
     g_shown_xfb[back] = xfb & 0x1FFFFFFFu;
     g_front = back;
