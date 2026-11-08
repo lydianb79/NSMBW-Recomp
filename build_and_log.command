@@ -5,6 +5,13 @@ cd "$(dirname "$0")"
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 {
   echo "=== $(date) ==="; sw_vers; uname -m
+  # If the project folder was moved, the old CMake cache points at the old
+  # location and cmake refuses to run: set the stale build dir aside.
+  if [ -f build/cmake/CMakeCache.txt ] && \
+     ! grep -qF "CMAKE_HOME_DIRECTORY:INTERNAL=$PWD" build/cmake/CMakeCache.txt; then
+    echo "project folder moved - starting a fresh CMake build directory"
+    mv build/cmake "build/cmake.old.$(date +%s)"
+  fi
   if [ -f build/gen/sources.cmake ] && [ -f build/image.bin ]; then
     cmake -S . -B build/cmake -DBUILD_DATA_DIR="$PWD/build" && cmake --build build/cmake -j "$(sysctl -n hw.ncpu)"
     rc=$?
