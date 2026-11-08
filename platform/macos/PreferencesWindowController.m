@@ -112,7 +112,8 @@ enum { G_RENDERER = 30, G_ICON = 31, G_RES = 1, G_FILTER, G_SCALE, G_ASPECT, G_T
     [self popup:@[ @"Metal (GPU)", @"Software (CPU)" ] at:NSMakeRect(X, y - 4, PW, 26)
        selected:rt_settings.renderer == 1 ? 1 : 0 tag:G_RENDERER in:v]; y -= dy;
     [v addSubview:label(@"App icon:", NSMakeRect(L, y, W, 20))];
-    [self popup:@[ @"Day", @"Sunset", @"Night", @"Winter", @"Autumn" ] at:NSMakeRect(X, y - 4, PW, 26)
+    [self popup:@[ @"Islands: Day", @"Islands: Sunset", @"Islands: Night", @"Islands: Winter", @"Islands: Autumn",
+                       @"Arcade Chip", @"Pixel Leap", @"Neon", @"Paper Craft", @"Minimal Bounce" ] at:NSMakeRect(X, y - 4, PW, 26)
        selected:rt_settings.app_icon tag:G_ICON in:v]; y -= dy;
     NSArray *res = @[ @"1× native (640×528)", @"2× (720p)", @"3× (1080p)", @"4× (1440p)", @"5×", @"6× (4K)", @"7×", @"8× (5K)" ];
     [v addSubview:label(@"Internal resolution:", NSMakeRect(L, y, W, 20))];

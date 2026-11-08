@@ -66,9 +66,10 @@ static void app_fatal(const char *msg) {
 
 /* Dock icon from the selected variant (all variants are in the bundle's Resources). */
 - (void)applyAppIcon {
-    static NSString *const names[] = { @"day", @"sunset", @"night", @"winter", @"autumn" };
+    static NSString *const names[] = { @"day", @"sunset", @"night", @"winter", @"autumn",
+                                       @"arcade_chip", @"pixel_leap", @"neon", @"paper", @"minimal" };
     int i = rt_settings.app_icon;
-    if (i < 0 || i > 4) i = 0;
+    if (i < 0 || i >= (int)(sizeof names / sizeof names[0])) i = 0;
     NSString *path = [[NSBundle mainBundle] pathForResource:[@"AppIcon-" stringByAppendingString:names[i]] ofType:@"icns"];
     NSImage *img = path ? [[NSImage alloc] initWithContentsOfFile:path] : nil;
     if (img) NSApp.applicationIconImage = img;

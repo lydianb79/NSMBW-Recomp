@@ -77,12 +77,15 @@ if(APPLE)
   set_source_files_properties(${APP_SHADERS} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
 
   # All icon variants are bundled (Preferences > Graphics > App icon switches the Dock icon at run
-  # time); NSMBW_ICON picks the one Finder shows: day, sunset, night, winter or autumn.
-  set(NSMBW_ICON "day" CACHE STRING "Default app icon variant (day, sunset, night, winter, autumn)")
+  # time); NSMBW_ICON picks the one Finder shows (see platform/macos/icons/).
+  set(NSMBW_ICON "day" CACHE STRING "Default app icon (day, sunset, night, winter, autumn, arcade_chip, pixel_leap, neon, paper, minimal)")
   set(APP_ICONS
     platform/macos/icons/AppIcon-day.icns platform/macos/icons/AppIcon-sunset.icns
     platform/macos/icons/AppIcon-night.icns platform/macos/icons/AppIcon-winter.icns
-    platform/macos/icons/AppIcon-autumn.icns)
+    platform/macos/icons/AppIcon-autumn.icns
+    platform/macos/icons/AppIcon-arcade_chip.icns platform/macos/icons/AppIcon-pixel_leap.icns
+    platform/macos/icons/AppIcon-neon.icns platform/macos/icons/AppIcon-paper.icns
+    platform/macos/icons/AppIcon-minimal.icns)
   set_source_files_properties(${APP_ICONS} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
   add_executable(NSMBWRecomp MACOSX_BUNDLE ${APP_SOURCES} ${APP_SHADERS} ${APP_ICONS})
   set_target_properties(NSMBWRecomp PROPERTIES
