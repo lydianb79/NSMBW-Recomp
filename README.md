@@ -99,7 +99,9 @@ NAND (saves, SYSCONF) is in the `nand/` folder next to it.
   task start-up, and AX: the DSP's per-frame work (voice decoding and mixing, aux-bus hand-off to
   the game's effects) done in C.
 - **Graphics**: a GX FIFO decoder feeds a front end that does vertex transform, lighting and
-  texgen on the CPU; triangles go to Metal (`platform/macos/MetalGX.m`: scaled EFB, MSAA, GPU-side
+  texgen on the CPU; triangles go to Metal (`platform/macos/MetalGX.m`: one shader generated and
+  compiled in the background per TEV setup, with a general "uber" shader drawing until it is ready;
+  scaled EFB, MSAA, GPU-side
   EFB copies, full-resolution display copies handed to the presenter) or the portable software
   rasteriser (`runtime/src/gx_soft.c`, used by the headless runner).
 - **Timing**: the VI clock (`runtime/src/rt_main.c`) locks to the display refresh reported by the
@@ -125,7 +127,7 @@ The Dock icon while the game runs follows Settings → Graphics → App icon. Th
 per-second status. Useful environment variables: `RT_PRESS="a@6,two@9,right@12-15"` (scripted
 input), `RT_WAV=out.wav` (record the audio mix), `RT_SOFTWARE_RENDER` (app: use the CPU renderer),
 `RT_CPU_EFB_COPIES`, `RT_XFB_READBACK` (app: write each frame to the guest XFB through a CPU readback, as before),
-`RT_NO_REVERB`, `RT_NO_REMOTE_SPEAKER`, `RT_NO_AUDIO`, `RT_INTERNAL_RES=<1-8>` (overrides the
+`RT_UBERSHADER_ONLY` (app: draw everything with the general TEV shader, no specialised shaders), `RT_NO_REVERB`, `RT_NO_REMOTE_SPEAKER`, `RT_NO_AUDIO`, `RT_INTERNAL_RES=<1-8>` (overrides the
 setting), `RT_NO_VSYNC_LOCK` (free-running 60 Hz timer), `RT_SND_SAFETY` (report a sound finished after the game
 has waited 3 s for it; a debugging aid for audio bugs). A hang prints every
 guest thread's call stack.

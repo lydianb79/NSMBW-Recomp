@@ -322,10 +322,7 @@ static MTLBlendFactor gx_factor(int f, bool is_src, bool no_alpha) {
 
 /* key: bit0 blend, bit1 subtract, bits2-4 src, bits5-7 dst, bit8 rgb write, bit9 alpha write,
  *      bit10 no-alpha EFB, bit16 clear pipeline */
-static id<MTLRenderPipelineState> pipeline(uint32_t key) {
-    NSNumber *k = @(key);
-    id<MTLRenderPipelineState> p = g_pipes[k];
-    if (p) return p;
+static MTLRenderPipelineDescriptor *pipe_desc(uint32_t key) {
     MTLRenderPipelineDescriptor *d = [[MTLRenderPipelineDescriptor alloc] init];
     bool clear = (key >> 16) & 1;
     d.vertexFunction = [g_lib newFunctionWithName:clear ? @"clear_vs" : @"gx_vs"];
@@ -351,11 +348,207 @@ static id<MTLRenderPipelineState> pipeline(uint32_t key) {
             c.destinationRGBBlendFactor = c.destinationAlphaBlendFactor = gx_factor((key >> 5) & 7, false, na);
         }
     }
+    return d;
+}
+
+static id<MTLRenderPipelineState> pipeline(uint32_t key) {
+    NSNumber *k = @(key);
+    id<MTLRenderPipelineState> p = g_pipes[k];
+    if (p) return p;
     NSError *err = nil;
-    p = [g_dev newRenderPipelineStateWithDescriptor:d error:&err];
+    p = [g_dev newRenderPipelineStateWithDescriptor:pipe_desc(key) error:&err];
     if (!p) { rt_log(0, "metal: pipeline %08X failed: %s", key, err.localizedDescription.UTF8String); return nil; }
     g_pipes[k] = p;
     return p;
+}
+
+/* ------------------------------------------------------------ specialised shaders
+ * The uber shader above handles any TEV setup, but it loops over 16 stages and
+ * picks every input by run-time index, which Apple GPUs execute slowly
+ * (registers spill to memory). Like Dolphin, each TEV setup the game uses gets
+ * its own straight-line shader with all selectors baked in (colours, konst
+ * values and matrices still come from the constant buffer). They are compiled
+ * in the background; until one is ready the uber shader draws. */
+static NSString *g_spec_prelude;                       /* structs + helpers + gx_vs */
+static NSMutableDictionary<NSNumber *, id> *g_spec_fn;  /* tev hash -> MTLFunction | NSNull (compiling / failed) */
+static NSMutableDictionary<NSNumber *, id> *g_spec_pipe;/* (hash, key, msaa) -> pipeline | NSNull */
+static NSLock *g_spec_lock;
+static int g_spec_pending;
+static uint64_t g_spec_ready, g_spec_draws, g_uber_draws;
+
+static uint64_t tev_hash(const RtGpuTev *t, int grad) {
+    uint64_t h = 1469598103934665603ull;
+#define H(v) do { h ^= (uint64_t)(uint32_t)(v); h *= 1099511628211ull; } while (0)
+    H(t->ntev); H(t->afunc0); H(t->afunc1); H(t->aop); H(t->nind); H(t->ind_active); H(grad);
+    for (int i = 0; i < 4 && i < t->nind; i++) { H(t->ind_slot[i]); H(t->ind_coord[i]); }
+    for (int s = 0; s < t->ntev && s < 16; s++) {
+        const RtGpuStage *S = &t->st[s];
+        for (int i = 0; i < 4; i++) { H(S->csel[i]); H(S->asel[i]); }
+        H(S->cbias); H(S->csub); H(S->cclamp); H(S->cshift); H(S->cdst); H(S->ccmp);
+        H(S->abias); H(S->asub); H(S->aclamp); H(S->ashift); H(S->adst); H(S->acmp);
+        H(S->ras); H(S->tex_slot); H(S->coord);
+        if (t->ind_active) { H(S->ibt); H(S->ifmt); H(S->ibias); H(S->ibs); H(S->imid); H(S->isw); H(S->itw); H(S->ifb); }
+    }
+#undef H
+    return h ? h : 1;
+}
+
+static NSString *spec_tap(int k, NSString *uv, NSString *gx, NSString *gy, int grad) {
+    k &= 7;
+    return grad ? [NSString stringWithFormat:@"x%d.sample(s%d, %@, gradient2d(%@, %@))", k, k, uv, gx, gy]
+                : [NSString stringWithFormat:@"x%d.sample(s%d, %@, level(0))", k, k, uv];
+}
+
+static NSString *spec_csel(int sel, int s) {
+    static NSString *const r[] = { @"R0.xyz", @"int3(R0.w)", @"R1.xyz", @"int3(R1.w)", @"R2.xyz", @"int3(R2.w)",
+                                   @"R3.xyz", @"int3(R3.w)", @"tx.xyz", @"int3(tx.w)", @"rc.xyz", @"int3(rc.w)",
+                                   @"int3(255)", @"int3(128)" };
+    if (sel >= 0 && sel <= 13) return r[sel];
+    if (sel == 14) return [NSString stringWithFormat:@"int3(T.st[%d].kc[0], T.st[%d].kc[1], T.st[%d].kc[2])", s, s, s];
+    return @"int3(0)";
+}
+static NSString *spec_asel(int sel, int s) {
+    static NSString *const r[] = { @"R0.w", @"R1.w", @"R2.w", @"R3.w", @"tx.w", @"rc.w" };
+    if (sel >= 0 && sel <= 5) return r[sel];
+    if (sel == 6) return [NSString stringWithFormat:@"T.st[%d].kc[3]", s];
+    return @"0";
+}
+
+static NSString *spec_source(const RtGpuTev *t, int grad) {
+    NSMutableString *m = [NSMutableString stringWithString:g_spec_prelude];
+    [m appendString:@"static int3 lerp3(int3 a, int3 b, int3 c, int3 d, int bias, int sub, int shift) {\n"
+                     "  int3 cc = c + (c >> 7);\n"
+                     "  int3 l = (a * (256 - cc) + b * cc) >> 8;\n"
+                     "  int3 v = sub != 0 ? d - l : d + l;\n"
+                     "  v += bias == 1 ? 128 : (bias == 2 ? -128 : 0);\n"
+                     "  return shift == 0 ? v : (shift == 1 ? v * 2 : (shift == 2 ? v * 4 : (v >> 1)));\n"
+                     "}\n"
+                     "fragment float4 spec_fs(VOut in [[stage_in]], constant Tev &T [[buffer(0)]], constant TScale &TS [[buffer(1)]],\n"
+                     "  texture2d<float> x0 [[texture(0)]], texture2d<float> x1 [[texture(1)]], texture2d<float> x2 [[texture(2)]], texture2d<float> x3 [[texture(3)]],\n"
+                     "  texture2d<float> x4 [[texture(4)]], texture2d<float> x5 [[texture(5)]], texture2d<float> x6 [[texture(6)]], texture2d<float> x7 [[texture(7)]],\n"
+                     "  sampler s0 [[sampler(0)]], sampler s1 [[sampler(1)]], sampler s2 [[sampler(2)]], sampler s3 [[sampler(3)]],\n"
+                     "  sampler s4 [[sampler(4)]], sampler s5 [[sampler(5)]], sampler s6 [[sampler(6)]], sampler s7 [[sampler(7)]]) {\n"
+                     "  int4 R0 = int4(T.regs[0][0], T.regs[0][1], T.regs[0][2], T.regs[0][3]);\n"
+                     "  int4 R1 = int4(T.regs[1][0], T.regs[1][1], T.regs[1][2], T.regs[1][3]);\n"
+                     "  int4 R2 = int4(T.regs[2][0], T.regs[2][1], T.regs[2][2], T.regs[2][3]);\n"
+                     "  int4 R3 = int4(T.regs[3][0], T.regs[3][1], T.regs[3][2], T.regs[3][3]);\n"
+                     "  int4 ras0 = clamp(int4(in.c0 + 0.5), 0, 255), ras1 = clamp(int4(in.c1 + 0.5), 0, 255);\n"
+                     "  float2 prevc = float2(0.0); (void)prevc;\n"];
+    /* indirect lookups */
+    int nind = t->nind < 0 ? 0 : t->nind > 4 ? 4 : t->nind;
+    for (int i = 0; i < nind; i++) {
+        if (t->ind_slot[i] < 0) { [m appendFormat:@"  int3 ind%d = int3(0);\n", i]; continue; }
+        int ic = t->ind_coord[i] & 7;
+        [m appendFormat:@"  float2 dv%d = float2(T.ind_div_s[%d], T.ind_div_t[%d]);\n", i, i, i];
+        NSString *uv = [NSString stringWithFormat:@"in.t%d * dv%d", ic, i];
+        NSString *gx = [NSString stringWithFormat:@"dfdx(in.t%d) * dv%d", ic, i], *gy = [NSString stringWithFormat:@"dfdy(in.t%d) * dv%d", ic, i];
+        [m appendFormat:@"  int4 ic%d = int4(%@ * 255.0 + 0.5);\n  int3 ind%d = int3(ic%d.w, ic%d.z, ic%d.y);\n",
+                        i, spec_tap(t->ind_slot[i], uv, gx, gy, grad), i, i, i, i];
+    }
+    for (int s = 0; s < t->ntev && s < 16; s++) {
+        const RtGpuStage *S = &t->st[s];
+        int co = S->coord & 7;
+        [m appendFormat:@"  { /* stage %d */\n    int4 tx = int4(255); int bump = 0; (void)bump;\n    float2 suv = in.t%d;\n", s, co];
+        if (t->ind_active) {
+            if (S->tex_slot >= 0)
+                [m appendFormat:@"    float2 td = float2(x%d.get_width(), x%d.get_height()) / float2(TS.s[%d][0], TS.s[%d][1]);\n",
+                                S->tex_slot & 7, S->tex_slot & 7, S->tex_slot & 7, S->tex_slot & 7];
+            else [m appendString:@"    float2 td = float2(1.0);\n"];
+            [m appendFormat:@"    float2 texel = suv * td;\n    float2 w = float2(wrap_ind(texel.x, %d), wrap_ind(texel.y, %d));\n    float2 off = float2(0.0);\n", S->isw, S->itw];
+            if (S->ibt >= 0 && S->ibt < nind) {
+                int fm = S->ifmt == 0 ? 255 : S->ifmt == 1 ? 31 : S->ifmt == 2 ? 15 : 7;
+                int bm = S->ifmt == 0 ? 0xF8 : S->ifmt == 1 ? 0xE0 : S->ifmt == 2 ? 0xF0 : 0xF8;
+                int badd = S->ifmt == 0 ? -128 : 1;
+                [m appendFormat:@"    int3 raw = ind%d; int3 crd = raw & %d;\n", S->ibt, fm];
+                if (S->ibs >= 1 && S->ibs <= 3) [m appendFormat:@"    bump = raw.%c & %d;\n", "xyz"[S->ibs - 1], bm];
+                if (S->ibias & 1) [m appendFormat:@"    crd.x += %d;\n", badd];
+                if (S->ibias & 2) [m appendFormat:@"    crd.y += %d;\n", badd];
+                if (S->ibias & 4) [m appendFormat:@"    crd.z += %d;\n", badd];
+                [m appendString:@"    float3 fc = float3(crd);\n"];
+                if (S->imid >= 1 && S->imid <= 3) {
+                    int k = S->imid - 1;
+                    [m appendFormat:@"    off = float2(T.imtx[%d][0] * fc.x + T.imtx[%d][2] * fc.y + T.imtx[%d][4] * fc.z,\n"
+                                     "                 T.imtx[%d][1] * fc.x + T.imtx[%d][3] * fc.y + T.imtx[%d][5] * fc.z) * T.imtx[%d][6];\n",
+                                    k, k, k, k, k, k, k];
+                } else if (S->imid >= 5 && S->imid <= 7) {
+                    [m appendFormat:@"    off = texel * fc.x / 256.0 * T.imtx[%d][6];\n", S->imid - 5];
+                } else if (S->imid >= 9 && S->imid <= 11) {
+                    [m appendFormat:@"    off = texel * fc.y / 256.0 * T.imtx[%d][6];\n", S->imid - 9];
+                }
+            }
+            [m appendString:@"    float2 f = w + off;\n"];
+            if (S->ifb) [m appendString:@"    f += prevc;\n"];
+            [m appendString:@"    prevc = f;\n    suv = f / td;\n"];
+        }
+        if (S->tex_slot >= 0) {
+            NSString *gx = [NSString stringWithFormat:@"dfdx(in.t%d)", co], *gy = [NSString stringWithFormat:@"dfdy(in.t%d)", co];
+            [m appendFormat:@"    tx = int4(%@ * 255.0 + 0.5);\n", spec_tap(S->tex_slot, @"suv", gx, gy, grad)];
+        }
+        switch (S->ras) {
+        case 0: [m appendString:@"    int4 rc = ras0;\n"]; break;
+        case 1: [m appendString:@"    int4 rc = ras1;\n"]; break;
+        case 3: [m appendString:@"    int4 rc = int4(bump);\n"]; break;
+        case 4: [m appendString:@"    int4 rc = int4(bump | (bump >> 5));\n"]; break;
+        case 2: [m appendString:@"    int4 rc = int4(0);\n"]; break;
+        default: [m appendString:@"    int4 rc = int4(bump);\n"]; break;      /* 5..7: as the uber shader */
+        }
+        [m appendString:@"    (void)rc; (void)tx;\n"];
+        [m appendFormat:@"    int3 ca = %@ & 255, cb = %@ & 255, cc = %@ & 255, cd = %@;\n",
+                        spec_csel(S->csel[0], s), spec_csel(S->csel[1], s), spec_csel(S->csel[2], s), spec_csel(S->csel[3], s)];
+        if (S->ccmp) [m appendString:@"    int3 cr = cd + select(int3(0), cc, ca > cb);\n"];
+        else [m appendFormat:@"    int3 cr = lerp3(ca, cb, cc, cd, %d, %d, %d);\n", S->cbias, S->csub, S->cshift];
+        [m appendFormat:@"    cr = %@;\n", S->cclamp ? @"clamp(cr, 0, 255)" : @"clamp(cr, -1024, 1023)"];
+        [m appendFormat:@"    int aa = %@ & 255, ab = %@ & 255, ac = %@ & 255, ad = %@;\n",
+                        spec_asel(S->asel[0], s), spec_asel(S->asel[1], s), spec_asel(S->asel[2], s), spec_asel(S->asel[3], s)];
+        if (S->acmp) [m appendString:@"    int ar = ad + (aa > ab ? ac : 0);\n"];
+        else [m appendFormat:@"    int ar = tev_lerp(aa, ab, ac, ad, %d, %d, %d);\n", S->abias, S->asub, S->ashift];
+        [m appendFormat:@"    ar = %@;\n", S->aclamp ? @"clamp(ar, 0, 255)" : @"clamp(ar, -1024, 1023)"];
+        [m appendFormat:@"    R%d.xyz = cr;\n    R%d.w = ar;\n  }\n", S->cdst & 3, S->adst & 3];
+    }
+    [m appendFormat:@"  int4 o = clamp(R0, 0, 255);\n"
+                     "  bool t0 = acmp(%d, o.w, T.aref0), t1 = acmp(%d, o.w, T.aref1);\n", t->afunc0, t->afunc1];
+    static NSString *const ops[] = { @"t0 && t1", @"t0 || t1", @"t0 != t1", @"t0 == t1" };
+    [m appendFormat:@"  if (!(%@)) discard_fragment();\n  return float4(o) / 255.0;\n}\n", ops[t->aop & 3]];
+    return m;
+}
+
+/* returns the specialised pipeline for this draw if it is ready, else nil
+ * (and starts building it) */
+static id<MTLRenderPipelineState> spec_pipeline(const RtGpuTev *t, uint32_t key, int grad) {
+    if (!g_spec_lock) return nil;
+    uint64_t h = tev_hash(t, grad);
+    NSNumber *pk = @(h ^ ((uint64_t)key << 1) ^ ((uint64_t)g_msaa << 40));
+    [g_spec_lock lock];
+    id p = g_spec_pipe[pk];
+    id fn = p ? nil : g_spec_fn[@(h)];
+    [g_spec_lock unlock];
+    if (p) return p == (id)[NSNull null] ? nil : p;
+    if (fn == (id)[NSNull null]) return nil;                 /* compiling, or failed */
+    if (!fn) {
+        if (g_spec_pending >= 8) return nil;                 /* don't flood the compiler */
+        [g_spec_lock lock]; g_spec_fn[@(h)] = [NSNull null]; g_spec_pending++; [g_spec_lock unlock];
+        NSString *src = spec_source(t, grad);
+        [g_dev newLibraryWithSource:src options:[[MTLCompileOptions alloc] init]
+                  completionHandler:^(id<MTLLibrary> lib, NSError *err) {
+            id<MTLFunction> f = [lib newFunctionWithName:@"spec_fs"];
+            [g_spec_lock lock];
+            g_spec_pending--;
+            if (f) g_spec_fn[@(h)] = f;                      /* else stays NSNull: uber shader for this one */
+            [g_spec_lock unlock];
+            if (!f) rt_log(0, "metal: specialised shader failed (uber shader keeps drawing it): %s",
+                           err.localizedDescription.UTF8String);
+        }];
+        return nil;
+    }
+    /* function ready: build the pipeline in the background too */
+    [g_spec_lock lock]; g_spec_pipe[pk] = [NSNull null]; [g_spec_lock unlock];
+    MTLRenderPipelineDescriptor *d = pipe_desc(key);
+    d.fragmentFunction = fn;
+    [g_dev newRenderPipelineStateWithDescriptor:d completionHandler:^(id<MTLRenderPipelineState> ps, NSError *err) {
+        if (!ps) return;                                     /* stays NSNull: uber shader */
+        [g_spec_lock lock]; g_spec_pipe[pk] = ps; g_spec_ready++; [g_spec_lock unlock];
+    }];
+    return nil;
 }
 
 static id<MTLDepthStencilState> depth_state(int enable, int func, int update) {
@@ -606,6 +799,10 @@ static void mtl_draw(const RtGpuDraw *d) {
         if (!(key & 0x300) && !(d->z_enable && d->z_update)) return;   /* writes nothing */
         memcpy((uint8_t *)g_vbuf.contents + g_voff, d->v, vbytes);
         memcpy((uint8_t *)g_ibuf.contents + g_ioff, d->idx, ibytes);
+        static int uber_only = -1;
+        if (uber_only < 0) uber_only = getenv("RT_UBERSHADER_ONLY") != NULL;
+        id<MTLRenderPipelineState> sp = uber_only ? nil : spec_pipeline(&d->tev, key, g_aniso > 1);
+        if (sp) { p = sp; g_spec_draws++; } else g_uber_draws++;
         [g_enc setRenderPipelineState:p];
         [g_enc setDepthStencilState:depth_state(d->z_enable, d->z_func, d->z_update)];
         [g_enc setCullMode:MTLCullModeNone];
@@ -785,8 +982,9 @@ static int mtl_display(int x, int y, int w, int h, uint32_t xfb) {
         g_stat_frames++;
         g_display_active = true;
         static uint64_t n;
-        if ((++n % 600) == 0) rt_log(1, "metal: %llu draws, %llu submits, %llu GPU texture copies",
-                                     (unsigned long long)g_draws, (unsigned long long)g_flushes, (unsigned long long)g_copies_gpu);
+        if ((++n % 600) == 0) rt_log(1, "metal: %llu draws (%llu specialised, %llu uber), %llu submits, %llu GPU texture copies, %llu shaders",
+                                     (unsigned long long)g_draws, (unsigned long long)g_spec_draws, (unsigned long long)g_uber_draws,
+                                     (unsigned long long)g_flushes, (unsigned long long)g_copies_gpu, (unsigned long long)g_spec_ready);
         apply_settings();      /* nothing is queued here: safe point to rebuild targets */
         return 1;
     }
@@ -842,6 +1040,15 @@ bool rt_metal_gx_install(void) {
         g_depths = [NSMutableDictionary dictionary];
         g_disp_lock = [[NSLock alloc] init];
         g_need_mips = [NSMutableArray array];
+        {
+            NSRange r = [kShaderSource rangeOfString:@"fragment float4 gx_fs"];
+            g_spec_prelude = r.location != NSNotFound ? [kShaderSource substringToIndex:r.location] : nil;
+            if (g_spec_prelude) {
+                g_spec_fn = [NSMutableDictionary dictionary];
+                g_spec_pipe = [NSMutableDictionary dictionary];
+                g_spec_lock = [[NSLock alloc] init];
+            }
+        }
 
         MTLTextureDescriptor *wd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                                                                       width:1 height:1 mipmapped:NO];
