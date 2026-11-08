@@ -16,7 +16,7 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint32_t *g_rgba[2];
 static uint32_t g_w, g_h, g_front;
 static uint64_t g_frame;
-static uint32_t g_pending_xfb;
+static uint32_t g_pending_xfb, g_shown_xfb[2];
 
 static inline uint8_t clamp8(int v) { return (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v); }
 
@@ -64,6 +64,7 @@ void rt_video_vi_retrace(void) {
     pthread_mutex_unlock(&g_lock);
     convert_xfb(xfb, w, h, stride, g_rgba[back]);
     pthread_mutex_lock(&g_lock);
+    g_shown_xfb[back] = xfb & 0x1FFFFFFFu;
     g_front = back;
     g_frame++;
     pthread_mutex_unlock(&g_lock);
@@ -76,8 +77,9 @@ bool rt_video_frame(RtFrame *out) {
         out->width = g_w; out->height = g_h;
         out->rgba = g_rgba[g_front];
         out->frame = g_frame;
+        out->xfb = g_shown_xfb[g_front];
         out->widescreen = rt_settings.aspect == RT_ASPECT_16_9 ||
-                          (rt_settings.aspect == RT_ASPECT_AUTO && rt_settings.widescreen_hack);
+                          (rt_settings.aspect == RT_ASPECT_AUTO && rt_settings.widescreen);   /* auto: what SYSCONF told the game */
     }
     pthread_mutex_unlock(&g_lock);
     return ok;

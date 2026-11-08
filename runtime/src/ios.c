@@ -170,6 +170,20 @@ static void nand_init(void) {
     snprintf(p, sizeof p, "%s/shared2/sys/SYSCONF", g_nand_root);
     struct stat sb;
     if (stat(p, &sb) != 0) sysconf_write_default(p);
+    /* aspect ratio follows Settings > Graphics > Widescreen */
+    FILE *f = fopen(p, "r+b");
+    if (f) {
+        uint8_t buf[0x4000];
+        size_t n = fread(buf, 1, sizeof buf, f);
+        for (size_t i = 0; i + 8 <= n; i++)
+            if (!memcmp(buf + i, "IPL.AR", 6) && i > 0 && (buf[i - 1] & 0x1F) == 5) {
+                uint8_t ar = rt_settings.widescreen ? 1 : 0;
+                if (buf[i + 6] != ar) { buf[i + 6] = ar; fseek(f, (long)(i + 6), SEEK_SET); fwrite(&ar, 1, 1, f); }
+                rt_log(1, "nand: SYSCONF aspect ratio %s", ar ? "16:9" : "4:3");
+                break;
+            }
+        fclose(f);
+    }
 }
 
 /* ------------------------------------------------------------ requests */

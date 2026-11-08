@@ -11,7 +11,7 @@ locally from the disc you supply.
 > **Status: playable.** The recompiled game boots, plays the title and opening cutscene, reaches
 > the world map and loads levels. Rendering runs on Metal (TEV uber-shader, indirect texturing,
 > GPU-side EFB copies), audio is mixed from the game's AX voices (ADPCM/PCM, sample-rate
-> conversion, envelopes, the game's own reverb on the aux buses, Wii Remote speaker sounds) and
+> conversion, envelopes, the game's own reverb on the aux buses, the Wii Remote speaker stream) and
 > played through Core Audio, and save data persists in a virtual NAND.
 
 ## What's here
@@ -67,9 +67,10 @@ calls, `gdb`/`lldb` backtraces show the guest call chain directly as `f_XXXXXXXX
 
 - Output filter: Nearest, Bilinear, Sharp bilinear (crisp pixels at non-integer scales), Scale2x (EPX), CRT (scanlines and aperture mask, adjustable strength), LCD grid
 - Scaling: Fit (keep aspect), Integer, Stretch
-- Aspect ratio: Auto, 4:3, 16:9; widescreen hack
+- Aspect ratio: Auto (follows the game), 4:3, 16:9. **Widescreen 16:9** (default on) tells the game, through SYSCONF, to render in 16:9; turn it off for 4:3. Takes effect at the next start.
 - Renderer: Metal (default) or the CPU software renderer
-- Internal resolution 1×–8×, texture filtering override, anisotropic filtering, MSAA. Stored, but the Metal renderer currently draws at 1× (see roadmap).
+- Internal resolution 1×–8× (default 2×): the Metal renderer draws the game at N × 640×528 and presents that image directly. Render-to-texture effects are made at the same resolution. Scale2x, CRT and LCD filters work on native pixels, so they show the 1× image.
+- Anti-aliasing: 2× / 4× MSAA. Anisotropic filtering 2×–16× (adds mipmaps to the game's textures). Texture filtering override (as the game sets it / nearest / linear).
 - V-Sync, frame-rate limit (60 / 50 / 120 / unlimited), FPS counter, full screen (⌃⌘F)
 - App icon: pick one of ten bundled designs; the Dock icon changes immediately
 
@@ -81,6 +82,7 @@ calls, `gdb`/`lldb` backtraces show the guest call chain directly as `f_XXXXXXXX
 - Remap any Wii Remote/Nunchuk function. Click a field, then press a key or button; Delete clears it.
 - Shake (spin jump), tilt left/right, optional left stick as D-pad, adjustable dead zone.
 - Default keyboard: arrows = D-pad, **X = 2 (jump)**, **Z = 1 (run/fire)**, Space = shake, Return = +, Tab = −, Q/E = tilt.
+- Rumble: when the game runs a remote's motor, the controller assigned to that player rumbles (controllers with haptics; can be turned off).
 
 Settings are saved to `~/Library/Application Support/NSMBWRecomp/settings.ini`. The virtual
 NAND (saves, SYSCONF) is in the `nand/` folder next to it.
@@ -93,11 +95,15 @@ NAND (saves, SYSCONF) is in the `nand/` folder next to it.
   on the extracted disc, `/dev/fs` on a host folder, ES, STM), guest threads on host threads with
   the game's own scheduler, interrupts delivered through `__OSDispatchInterrupt`.
 - **HLE** (`runtime/src/hle/`): OS context switching, WPAD/KPAD input (remotes reported as
-  connected; speaker commands acknowledged), DSP task start-up, and AX: the DSP's per-frame work
-  (voice decoding and mixing, aux-bus hand-off to the game's effects) done in C.
+  connected, speaker stream decoded from its Yamaha ADPCM, motor state passed on as rumble), DSP
+  task start-up, and AX: the DSP's per-frame work (voice decoding and mixing, aux-bus hand-off to
+  the game's effects) done in C.
 - **Graphics**: a GX FIFO decoder feeds a front end that does vertex transform, lighting and
-  texgen on the CPU; triangles go to Metal (`platform/macos/MetalGX.m`) or the portable software
+  texgen on the CPU; triangles go to Metal (`platform/macos/MetalGX.m`: scaled EFB, MSAA, GPU-side
+  EFB copies, full-resolution display copies handed to the presenter) or the portable software
   rasteriser (`runtime/src/gx_soft.c`, used by the headless runner).
+- **Timing**: the VI clock (`runtime/src/rt_main.c`) locks to the display refresh reported by the
+  app's display link; the AI clock paces audio DMA every 3 ms.
 
 ## App icons
 
@@ -118,17 +124,29 @@ The Dock icon while the game runs follows Settings → Graphics → App icon. Th
 `build/cmake/nsmbw-headless build game -v -t <seconds>` runs the game without a window and prints
 per-second status. Useful environment variables: `RT_PRESS="a@6,two@9,right@12-15"` (scripted
 input), `RT_WAV=out.wav` (record the audio mix), `RT_SOFTWARE_RENDER` (app: use the CPU renderer),
-`RT_CPU_EFB_COPIES`, `RT_NO_REVERB`, `RT_NO_REMOTE_SPEAKER`, `RT_NO_AUDIO`. A hang prints every
+`RT_CPU_EFB_COPIES`, `RT_NO_REVERB`, `RT_NO_REMOTE_SPEAKER`, `RT_NO_AUDIO`, `RT_INTERNAL_RES=<1-8>` (overrides the
+setting), `RT_NO_VSYNC_LOCK` (free-running 60 Hz timer), `RT_SND_SAFETY` (report a sound finished after the game
+has waited 3 s for it; a debugging aid for audio bugs). A hang prints every
 guest thread's call stack.
 
 ## Known gaps / roadmap
 
-1. Internal resolution above 1× for the Metal renderer (the setting is stored but not yet used).
-2. A few sounds never leave nw4r::snd's prepare stage; a 3-second safeguard reports such a sound
-   finished when the game waits on it (`RT_NO_SND_SAFETY` disables it). Find and fix the cause.
-3. Remote-speaker audio is taken from the AX remote bus; the ADPCM stream sent to the remote is
-   accepted and dropped.
-4. Smoother frame pacing when the game drops below 60 fps.
+1. Rumble and the decoded remote-speaker stream are written from the hardware specs and have not
+   yet been checked against a real play session; the speaker falls back to the AX remote bus
+   whenever no stream is coming in.
+2. Internal resolution: XFB copies with vertical scaling are presented unscaled (NSMBW does not
+   use them).
+3. Only the Metal renderer has the enhancements; the CPU renderer stays at 1×.
+
+### Recently fixed
+
+- One-shot voices now end the way AXWii ends them: the voice stops and its play position jumps to
+  the loop address. nw4r::snd points that at a silent buffer and checks for it to decide that a
+  wave has finished. This was why some sounds (the "player decide" voice after choosing players)
+  never finished, and why a 3-second safety net was needed. That net is now off.
+- Frame pacing: on 60/120/180/240 Hz displays the game's VI clock follows the display's own
+  refresh, half a refresh after each vsync. Every game frame is then on screen for exactly one
+  refresh, with no doubled or skipped frames from two clocks drifting apart.
 
 ## How the recompiled code looks
 

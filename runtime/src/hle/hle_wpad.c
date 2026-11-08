@@ -158,10 +158,68 @@ PPC_HLE(HLE_WPADControlLed) {
 
 /* ------------------------------------------------------------ remote speaker */
 /* The speaker is reached over Bluetooth; there is none, so the commands
- * "succeed" at once and the stream data is accepted (and dropped - the sound
- * itself is mixed from the AX remote bus in hle_ax.c). Without this, sounds
- * meant for the remote never start or finish. */
+ * "succeed" at once. The audio the game streams to a remote (4-bit Yamaha
+ * ADPCM, as encoded by the SDK's WENC) is decoded here and played on the host
+ * output by hle_ax.c (rt_wpad_speaker_mix). While no stream is flowing, hle_ax
+ * mixes the AX remote bus instead. Without these HLEs, sounds meant for the
+ * remote never start or finish. */
 static int g_speaker_on[4];
+
+#define SPK_RING 16384
+typedef struct {
+    int16_t ring[SPK_RING];
+    uint32_t wr;                 /* samples written (free-running) */
+    double rd;                   /* read position in samples */
+    int predictor, step;
+    uint64_t last_ax_frame;      /* AX frame of the last packet */
+} Speaker;
+static Speaker g_spk[4];
+static uint64_t g_ax_frames;     /* advanced by rt_wpad_speaker_mix (one per 3 ms AX frame) */
+static double g_spk_rate = 3000.0;
+static uint64_t g_rate_samples, g_rate_t0;
+
+static void spk_reset(Speaker *k) { k->predictor = 0; k->step = 127; }
+
+/* Yamaha ADPCM (as the Wii Remote's speaker decodes it), high nibble first */
+static int16_t yamaha_nibble(Speaker *k, int n) {
+    static const int diff[16] = { 1, 3, 5, 7, 9, 11, 13, 15, -1, -3, -5, -7, -9, -11, -13, -15 };
+    static const int scale[16] = { 230, 230, 230, 230, 307, 409, 512, 614, 230, 230, 230, 230, 307, 409, 512, 614 };
+    k->predictor += k->step * diff[n] / 8;
+    if (k->predictor > 32767) k->predictor = 32767;
+    if (k->predictor < -32768) k->predictor = -32768;
+    k->step = (k->step * scale[n]) >> 8;
+    if (k->step < 127) k->step = 127;
+    if (k->step > 24576) k->step = 24576;
+    return (int16_t)k->predictor;
+}
+
+/* Adds the decoded remote-speaker streams (all remotes) to `out` (n samples at
+ * 32 kHz). Returns 0 when no remote has received audio recently. */
+int rt_wpad_speaker_mix(int32_t *out, int n) {
+    g_ax_frames++;
+    int active = 0;
+    for (int c = 0; c < 4; c++) {
+        Speaker *k = &g_spk[c];
+        if (!k->last_ax_frame || g_ax_frames - k->last_ax_frame > 70) continue;   /* ~200 ms */
+        active = 1;
+        double fill = (double)k->wr - k->rd;
+        if (fill < 0 || fill > SPK_RING / 2) { k->rd = (double)k->wr - g_spk_rate * 0.05; fill = g_spk_rate * 0.05; }
+        /* keep ~50 ms queued: nudge the playback rate by up to 2% */
+        double target = g_spk_rate * 0.05, adj = 1.0 + (fill - target) / target * 0.02;
+        if (adj < 0.98) adj = 0.98;
+        if (adj > 1.02) adj = 1.02;
+        double inc = g_spk_rate * adj / 32000.0;
+        for (int i = 0; i < n; i++) {
+            if (k->rd + 1.0 >= (double)k->wr) break;           /* underrun: leave the rest silent */
+            uint32_t i0 = (uint32_t)k->rd;
+            double f = k->rd - (double)i0;
+            int s0 = k->ring[i0 % SPK_RING], s1 = k->ring[(i0 + 1) % SPK_RING];
+            out[i] += (int32_t)((s0 + (s1 - s0) * f) * 0.7);
+            k->rd += inc;
+        }
+    }
+    return active;
+}
 
 static void call_wpad_cb(PPCContext *ctx, uint8_t *base, uint32_t cb, int chan, int32_t result) {
     if (!cb) return;
@@ -178,9 +236,22 @@ PPC_HLE(HLE_WPADControlSpeaker) {          /* s32 (s32 chan, u32 command, WPADCa
     RtPlayerInput in; rt_input_get(chan, &in);
     int32_t res = in.connected ? 0 : -1;
     if (in.connected) g_speaker_on[chan] = cmd != 0;           /* WPAD_SPEAKER_OFF = 0 */
+    spk_reset(&g_spk[chan]);                                    /* on / play: the decoder restarts */
     if (getenv("RT_WPAD_TRACE")) rt_log(0, "wpad: ControlSpeaker(chan %d, cmd %u) -> %d", chan, cmd, res);
     call_wpad_cb(ctx, base, cb, chan, res);
     ctx->r[3] = (uint32_t)res;
+}
+
+/* ------------------------------------------------------------ rumble */
+static volatile int g_motor[4];
+bool rt_input_rumble(int player) { return player >= 0 && player < 4 && g_motor[player]; }
+
+void __imp_f_801E1620(PPCContext *ctx, uint8_t *base);
+PPC_HLE(HLE_WPADControlMotor) {
+    int chan = (int)(ctx->r[3] & 3);
+    __imp_f_801E1620(ctx, base);           /* honours the Wii's "rumble off" setting */
+    uint32_t cb = ld32(base, WPAD_CB_TABLE + 4u * (uint32_t)chan);
+    if (cb >= 0x80000000u && cb < 0x81800000u) g_motor[chan] = ld32(base, cb + WPAD_CB_MOTOR) != 0;
 }
 
 PPC_HLE(HLE_WPADIsSpeakerEnabled) {
@@ -193,6 +264,27 @@ PPC_HLE(HLE_WPADCanSendStreamData) {
 }
 
 PPC_HLE(HLE_WPADSendStreamData) {          /* s32 (s32 chan, void *data, u16 len) */
-    RtPlayerInput in; rt_input_get((int)(ctx->r[3] & 3), &in);
+    int chan = (int)(ctx->r[3] & 3);
+    uint32_t data = ctx->r[4], len = ctx->r[5] & 0xFFFF;
+    RtPlayerInput in; rt_input_get(chan, &in);
+    if (in.connected && data && len <= 64) {
+        Speaker *k = &g_spk[chan];
+        if (!k->step) spk_reset(k);
+        for (uint32_t i = 0; i < len; i++) {
+            uint8_t b = ld8(base, data + i);
+            k->ring[k->wr++ % SPK_RING] = yamaha_nibble(k, b >> 4);
+            k->ring[k->wr++ % SPK_RING] = yamaha_nibble(k, b & 15);
+        }
+        k->last_ax_frame = g_ax_frames ? g_ax_frames : 1;
+        /* the speaker's sample rate is set through its registers; measure it from the packet rate instead */
+        if (!g_rate_t0) g_rate_t0 = g_ax_frames;
+        g_rate_samples += len * 2;
+        uint64_t frames = g_ax_frames - g_rate_t0;
+        if (frames >= 333) {                                       /* ~1 s */
+            double r = (double)g_rate_samples / ((double)frames * 0.003);
+            if (r > 1500.0 && r < 12000.0) g_spk_rate = g_spk_rate * 0.5 + r * 0.5;
+            g_rate_samples = 0; g_rate_t0 = g_ax_frames;
+        }
+    }
     ctx->r[3] = in.connected ? 0u : (uint32_t)-1;
 }

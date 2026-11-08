@@ -66,6 +66,9 @@
 
 /* Wii Remote speaker (WPAD) */
 #define HLE_WPADControlSpeaker   f_801E1F60
+/* void WPADControlMotor(s32 chan, u32 command): rumble on (1) / off (0) */
+#define HLE_WPADControlMotor     f_801E1620
+#define WPAD_CB_MOTOR            0x8D4   /* control block: motor running */
 #define HLE_WPADIsSpeakerEnabled f_801E1F10
 #define HLE_WPADCanSendStreamData f_801E3730
 #define HLE_WPADSendStreamData   f_801E37C0

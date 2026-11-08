@@ -97,11 +97,11 @@ if(APPLE)
     MACOSX_BUNDLE_SHORT_VERSION_STRING "0.1.0"
     MACOSX_BUNDLE_BUNDLE_VERSION "1"
     XCODE_ATTRIBUTE_CLANG_ENABLE_OBJC_ARC YES)
-  target_compile_options(NSMBWRecomp PRIVATE -fobjc-arc -Wall -Wno-unused-parameter)
+  target_compile_options(NSMBWRecomp PRIVATE -fobjc-arc -Wall -Wno-unused-parameter -Wno-deprecated-declarations)
   target_include_directories(NSMBWRecomp PRIVATE runtime/include runtime/src)
   target_link_libraries(NSMBWRecomp PRIVATE ${RT_LINK}
     "-framework Cocoa" "-framework Metal" "-framework MetalKit" "-framework QuartzCore"
-    "-framework GameController" "-framework AudioToolbox" "-framework UniformTypeIdentifiers")
+    "-framework GameController" "-framework AudioToolbox" "-framework CoreVideo" "-framework CoreHaptics" "-framework UniformTypeIdentifiers")
 
   # Shaders.metal ships as a resource and is compiled at launch, so only the
   # Command Line Tools are required. The recompiled image is copied in too.

@@ -25,8 +25,10 @@ vertex VOut present_vs(uint vid [[vertex_id]]) {
     return o;
 }
 
-constexpr sampler s_nearest(filter::nearest, address::clamp_to_edge);
-constexpr sampler s_linear(filter::linear, address::clamp_to_edge);
+// mip filtering only matters for the full-resolution frames (internal
+// resolution above 1x) when the window is smaller than the image
+constexpr sampler s_nearest(filter::nearest, mip_filter::nearest, address::clamp_to_edge);
+constexpr sampler s_linear(filter::linear, mip_filter::linear, address::clamp_to_edge);
 
 static float4 sharp_bilinear(texture2d<float> t, float2 uv, constant Params &p) {
     float2 texel = uv * p.src_size;
@@ -36,7 +38,8 @@ static float4 sharp_bilinear(texture2d<float> t, float2 uv, constant Params &p) 
     float2 region = 0.5 - 0.5 / scale;
     float2 cd = s - 0.5;
     float2 f = (cd - clamp(cd, -region, region)) * scale + 0.5;
-    float4 sharp = t.sample(s_linear, (tf + f) / p.src_size);
+    // gradients from the smooth coordinate: (tf + f) jumps at texel edges
+    float4 sharp = t.sample(s_linear, (tf + f) / p.src_size, gradient2d(dfdx(uv), dfdy(uv)));
     float4 soft = t.sample(s_linear, uv);
     return mix(soft, sharp, clamp(0.5 + p.sharpness, 0.0, 1.0));
 }

@@ -148,12 +148,12 @@ enum { G_RENDERER = 30, G_ICON = 31, G_RES = 1, G_FILTER, G_SCALE, G_ASPECT, G_T
     [v addSubview:label(@"Audio volume:", NSMakeRect(L, y, W, 20))];
     [self slider:rt_settings.audio_volume / 100.0 at:NSMakeRect(X, y, PW, 20) tag:S_VOLUME in:v]; y -= dy + 4;
     [self check:@"V-Sync" at:NSMakeRect(X, y, PW, 20) on:rt_settings.vsync tag:G_VSYNC in:v]; y -= 26;
-    [self check:@"Widescreen hack (render 16:9)" at:NSMakeRect(X, y, PW + 60, 20) on:rt_settings.widescreen_hack tag:G_WIDE in:v]; y -= 26;
+    [self check:@"Widescreen 16:9 (needs restart)" at:NSMakeRect(X, y, PW + 60, 20) on:rt_settings.widescreen tag:G_WIDE in:v]; y -= 26;
     [self check:@"Show FPS in title bar" at:NSMakeRect(X, y, PW, 20) on:rt_settings.show_fps tag:G_SHOWFPS in:v]; y -= 26;
     [self check:@"Full screen" at:NSMakeRect(X, y, PW, 20) on:rt_settings.fullscreen tag:G_FULL in:v]; y -= 34;
     NSTextField *note = [NSTextField wrappingLabelWithString:
-        @"Output filter, scaling, aspect and V-Sync apply immediately. Internal resolution, texture filtering, "
-         "anisotropy and MSAA are used by the GX renderer."];
+        @"Changes apply immediately, except the renderer and widescreen (next start). Internal resolution, "
+         "anti-aliasing and anisotropic filtering need the Metal renderer; Scale2x, CRT and LCD use native pixels."];
     note.frame = NSMakeRect(L, y - 20, 540, 40);
     note.textColor = NSColor.secondaryLabelColor;
     note.font = [NSFont systemFontOfSize:11];
@@ -182,7 +182,7 @@ enum { G_RENDERER = 30, G_ICON = 31, G_RES = 1, G_FILTER, G_SCALE, G_ASPECT, G_T
     bool on = b.state == NSControlStateValueOn;
     switch (b.tag) {
         case G_VSYNC: rt_settings.vsync = on; break;
-        case G_WIDE: rt_settings.widescreen_hack = on; break;
+        case G_WIDE: rt_settings.widescreen = on; break;
         case G_SHOWFPS: rt_settings.show_fps = on; break;
         case G_FULL: rt_settings.fullscreen = on; break;
     }
@@ -244,6 +244,10 @@ enum { G_RENDERER = 30, G_ICON = 31, G_RES = 1, G_FILTER, G_SCALE, G_ASPECT, G_T
     NSSlider *dz = [NSSlider sliderWithValue:rt_settings.stick_deadzone minValue:0 maxValue:0.9 target:self action:@selector(deadzone:)];
     dz.frame = NSMakeRect(395, y, 140, 20);
     [v addSubview:dz];
+    NSButton *rum = [NSButton checkboxWithTitle:@"Rumble (controllers with haptics)" target:self action:@selector(rumbleToggle:)];
+    rum.frame = NSMakeRect(20, y - 32, 300, 20);
+    rum.state = rt_settings.rumble ? NSControlStateValueOn : NSControlStateValueOff;
+    [v addSubview:rum];
     NSButton *reset = [NSButton buttonWithTitle:@"Restore Defaults" target:self action:@selector(resetInput:)];
     reset.frame = NSMakeRect(395, y - 36, 140, 28);
     [v addSubview:reset];
@@ -272,6 +276,7 @@ enum { G_RENDERER = 30, G_ICON = 31, G_RES = 1, G_FILTER, G_SCALE, G_ASPECT, G_T
     rt_settings.pad_index[[self currentPlayer]] = (int)s.indexOfSelectedItem - 1;
     [self changed];
 }
+- (void)rumbleToggle:(NSButton *)b { rt_settings.rumble = b.state == NSControlStateValueOn; [self changed]; }
 - (void)stickToggle:(NSButton *)b { rt_settings.stick_as_dpad = b.state == NSControlStateValueOn; [self changed]; }
 - (void)deadzone:(NSSlider *)s { rt_settings.stick_deadzone = (float)s.doubleValue; [self changed]; }
 

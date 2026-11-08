@@ -1286,6 +1286,7 @@ static void soft_copy_display(uint32_t xfb, uint32_t w, uint32_t h, uint32_t fla
         if (x0 + rw > EFB_W) rw = EFB_W - x0;
         if (y0 + rh > EFB_H) rh = EFB_H - y0;
         if (rw > 0 && rh > 0) {
+            if (g_gpu->display) g_gpu->display(x0, y0, rw, rh, xfb);
             g_gpu->readback(x0, y0, rw, rh, &g_efb[y0 * EFB_W + x0], EFB_W);
             int pf = bp(0x43) & 7;
             if (pf == 0 || pf == 2)              /* no alpha in the EFB: reads back as 1.0 */

@@ -41,7 +41,7 @@ typedef struct {
     int         app_icon;           /* 0-4 islands (day..autumn), 5 arcade chip, 6 pixel leap, 7 neon, 8 paper, 9 minimal */
     int         anisotropy;         /* 1,2,4,8,16 */
     int         msaa;               /* 1,2,4 */
-    bool        widescreen_hack;
+    bool        widescreen;         /* game renders 16:9 (SYSCONF IPL.AR); applied at start-up */
     bool        vsync;
     bool        fullscreen;
     int         fps_limit;          /* 0 = unlimited, 60 = native */
@@ -54,6 +54,7 @@ typedef struct {
     int         pad_index[4];       /* which connected controller drives player n (-1 none) */
     float       stick_deadzone;
     bool        stick_as_dpad;
+    bool        rumble;             /* Wii Remote rumble -> controller haptics */
     /* paths */
     char        game_dir[1024];     /* extracted disc: <dir>/sys, <dir>/files */
 } RtSettings;
@@ -73,6 +74,8 @@ typedef struct {
 } RtPlayerInput;
 void rt_input_set(int player, const RtPlayerInput *in);
 void rt_input_get(int player, RtPlayerInput *out);
+/* true while the game has the remote's rumble motor of `player` running */
+bool rt_input_rumble(int player);
 
 /* ------------------------------------------------------------ video */
 typedef struct {
@@ -80,9 +83,15 @@ typedef struct {
     const uint32_t *rgba;     /* 0xAABBGGRR little-endian */
     uint64_t frame;           /* increments on every VI retrace with a new image */
     bool     widescreen;      /* game asked for 16:9 (SYSCONF / VI) */
+    uint32_t xfb;             /* guest physical address of the XFB shown (a GPU
+                                 renderer may hold a higher-resolution copy of it) */
 } RtFrame;
 /* Returns false while no frame is available yet. */
 bool rt_video_frame(RtFrame *out);
+/* Host display timing (call on every display refresh): time until the next
+ * vsync on the caller's clock and the refresh period. Lets the VI clock lock
+ * to 60 Hz displays (and 120/180/240 Hz) for even frame pacing. */
+void rt_vi_display_sync(int64_t next_vsync_in_ns, uint64_t period_ns);
 
 /* ------------------------------------------------------------ audio */
 /* 32 kHz interleaved stereo int16. Fills `frames` frames (silence when the game

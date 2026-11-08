@@ -1,12 +1,59 @@
 // InputManager.m - keyboard + GameController (Xbox, PlayStation, Switch Pro,
 // MFi) mapped onto the Wii Remote/Nunchuk buttons the game expects.
 #import "InputManager.h"
+#import <CoreHaptics/CoreHaptics.h>
 #include <math.h>
 #include "rt.h"
+
+/* Rumble on one controller: a long continuous haptic event, started and
+ * stopped as the game switches the remote's motor on and off. */
+@interface PadRumble : NSObject
+@property(nonatomic, strong) CHHapticEngine *engine;
+@property(nonatomic, strong) id<CHHapticAdvancedPatternPlayer> player;
+@property(nonatomic) BOOL on;
+@end
+@implementation PadRumble
+@end
 
 @implementation InputManager {
     bool _keys[256];
     NSLock *_lock;
+    NSMapTable<GCController *, PadRumble *> *_rumble;
+}
+
+- (void)setRumble:(BOOL)on forController:(GCController *)c {
+    if (@available(macOS 11.0, *)) {
+        if (!_rumble) _rumble = [NSMapTable weakToStrongObjectsMapTable];
+        PadRumble *r = [_rumble objectForKey:c];
+        if (!r) {
+            if (!on || !c.haptics) return;
+            r = [[PadRumble alloc] init];
+            r.engine = [c.haptics createEngineWithLocality:GCHapticsLocalityDefault];
+            if (!r.engine) return;
+            r.engine.playsHapticsOnly = YES;
+            NSError *err = nil;
+            [r.engine startAndReturnError:&err];
+            CHHapticEventParameter *in = [[CHHapticEventParameter alloc] initWithParameterID:CHHapticEventParameterIDHapticIntensity value:1.0];
+            CHHapticEventParameter *sh = [[CHHapticEventParameter alloc] initWithParameterID:CHHapticEventParameterIDHapticSharpness value:0.4];
+            CHHapticEvent *ev = [[CHHapticEvent alloc] initWithEventType:CHHapticEventTypeHapticContinuous parameters:@[ in, sh ]
+                                                            relativeTime:0 duration:30.0];
+            CHHapticPattern *pat = [[CHHapticPattern alloc] initWithEvents:@[ ev ] parameters:@[] error:&err];
+            if (pat) r.player = [r.engine createAdvancedPlayerWithPattern:pat error:&err];
+            if (!r.player) return;
+            r.player.loopEnabled = YES;                 /* keeps going for as long as the motor is on */
+            /* after a reset/stop (controller asleep, app inactive) rebuild on the next change */
+            __weak NSMapTable *map = _rumble;
+            __weak GCController *wc = c;
+            r.engine.resetHandler = ^{ GCController *k = wc; if (k) [map removeObjectForKey:k]; };
+            r.engine.stoppedHandler = ^(CHHapticEngineStoppedReason reason) { GCController *k = wc; if (k) [map removeObjectForKey:k]; };
+            [_rumble setObject:r forKey:c];
+        }
+        if (on == r.on) return;
+        r.on = on;
+        NSError *err = nil;
+        if (on) { [r.engine startAndReturnError:&err]; [r.player startAtTime:CHHapticTimeImmediate error:&err]; }
+        else [r.player stopAtTime:CHHapticTimeImmediate error:&err];
+    }
 }
 
 + (instancetype)shared {
@@ -102,6 +149,7 @@ static BOOL padPressed(GCExtendedGamepad *g, int el) {
             }
             float rx = g.rightThumbstick.xAxis.value;
             in.tilt = fabsf(rx) < dz ? 0 : rx;
+            [self setRumble:(rt_settings.rumble && rt_input_rumble(p)) forController:pads[pi]];
         }
         if (in.held & (1u << RT_BTN_TILT_LEFT)) in.tilt = -1;
         if (in.held & (1u << RT_BTN_TILT_RIGHT)) in.tilt = 1;

@@ -77,6 +77,10 @@ typedef struct {
      * simplified target (6 RGBA8, 4 RGB565, 5 RGB5A3, 3 IA8, 1 I8). Returns 0
      * if not handled, then the front end reads back and encodes on the CPU. */
     int (*copy_tex)(int x, int y, int w, int h, int half, int fmt, int no_alpha, uint32_t dest, uint32_t tw, uint32_t th);
+    /* optional: the game copies this EFB rectangle to the XFB at guest address
+     * `xfb`. Lets the sink keep a full-resolution copy for presentation
+     * (internal resolution above 1x). Called before the matching readback. */
+    void (*display)(int x, int y, int w, int h, uint32_t xfb);
 } RtGpuSink;
 
 /* install (or remove, with NULL) the hardware rasteriser; call before rt_run */

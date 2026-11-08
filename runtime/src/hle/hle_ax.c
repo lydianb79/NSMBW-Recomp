@@ -70,7 +70,14 @@ static int voice_next_sample(Voice *v) {
                 if (!v->is_stream) { v->yn1 = (int16_t)ld16(v->base, v->pb + 0xB6); v->yn2 = (int16_t)ld16(v->base, v->pb + 0xB8); }
                 if ((v->cur & 15) < 2) v->cur = (v->cur & ~15u) + 2;
             }
-        } else v->stopped = 1;
+        } else {
+            /* AXWii: a one-shot voice that reaches its end stops and its
+             * current address is set to the loop address. nw4r::snd points
+             * that at its zero buffer and treats "current address inside the
+             * zero buffer" as "wave finished" (AxVoice::IsPlayFinished). */
+            v->stopped = 1;
+            v->cur = v->loop_a;
+        }
     } else v->cur++;
     return out;
 }
@@ -124,12 +131,20 @@ static void ax_run_aux(PPCContext *ctx, uint8_t *base) {
 }
 
 /* Wii Remote speaker: the remote's small speaker, played on the host output
- * through a band-pass (~400 Hz - 3.5 kHz) so it sounds like it. */
+ * through a band-pass (~400 Hz - 3.5 kHz) so it sounds like it. Source: the
+ * decoded speaker stream (hle_wpad.c) when the game is sending one, else the
+ * AX remote bus. */
+int rt_wpad_speaker_mix(int32_t *out, int n);
 static void ax_mix_remote(void) {
     static float hp_x, hp_y, lp_y;
     static int off = -1;
     if (off < 0) off = getenv("RT_NO_REMOTE_SPEAKER") != NULL;
     if (off) return;
+    /* the stream the game sends to the remotes is the real thing; the AX
+     * remote bus is the fallback while nothing is being streamed */
+    static int32_t stream[AX_FRAME];
+    memset(stream, 0, sizeof stream);
+    if (rt_wpad_speaker_mix(stream, AX_FRAME)) memcpy(g_rmt, stream, sizeof stream);
     const float a_hp = 0.926f;          /* 1-pole high-pass, fc ~ 380 Hz at 32 kHz */
     const float a_lp = 0.497f;          /* 1-pole low-pass,  fc ~ 3.5 kHz */
     for (int k = 0; k < AX_FRAME; k++) {
@@ -250,18 +265,16 @@ PPC_HLE(HLE_AXOutAiCallback) {
     for (int i = 0; i < 3 && ours; i++) if (!ld32(base, ctx->r[13] + sda[i])) st32(base, ctx->r[13] + sda[i], saved[i]);
 }
 
-/* Until the audio path is complete, some sounds never get past nw4r::snd's
- * prepare stage, so code that waits for "sound ID n finished" (e.g. the
- * character voice after player selection, dScGameSetup_c VoiceEndWait) would
- * wait forever. If the same sound has been reported active for 3 seconds of
- * continuous polling, report it finished. */
+/* Debug aid (RT_SND_SAFETY=1): if code keeps waiting for the same sound for
+ * 3 seconds, report it finished. Not needed since one-shot voices end the way
+ * AXWii ends them (see voice_next_sample); kept for tracking down audio bugs. */
 void __imp_f_80196740(PPCContext *ctx, uint8_t *base);
 PPC_HLE(HLE_SndIsSoundActive) {
     uint32_t id = ctx->r[4];
     __imp_f_80196740(ctx, base);
-    static int off = -1;
-    if (off < 0) off = getenv("RT_NO_SND_SAFETY") != NULL;
-    if (off) return;
+    static int on = -1;
+    if (on < 0) on = getenv("RT_SND_SAFETY") != NULL;
+    if (!on) return;
     static uint32_t last_id = 0xFFFFFFFFu; static uint64_t since_vi;
     if (!(ctx->r[3] & 0xFF)) { if (id == last_id) last_id = 0xFFFFFFFFu; return; }
     if (id != last_id) { last_id = id; since_vi = rt_stats.vi_frames; return; }

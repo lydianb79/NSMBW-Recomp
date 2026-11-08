@@ -141,12 +141,56 @@ static void sleep_until(uint64_t *deadline, uint64_t period) {
     }
 }
 
+/* Display lock: the host reports the display's refresh (rt_vi_display_sync).
+ * When the display runs at 60 Hz or a multiple (120, 180, 240), the VI clock
+ * takes the display's exact period and is phase-locked half a refresh after
+ * each vsync. The game then finishes every frame mid-interval and the
+ * presenter shows each one for exactly one VI period - no beat between two
+ * free-running clocks (a doubled or dropped frame every few seconds). */
+static pthread_mutex_t g_vsync_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t g_vsync_ns, g_vsync_period_ns, g_vsync_seen_ns;
+
+void rt_vi_display_sync(int64_t next_vsync_in_ns, uint64_t period_ns) {
+    uint64_t now = now_ns();
+    pthread_mutex_lock(&g_vsync_lock);
+    g_vsync_ns = (uint64_t)((int64_t)now + next_vsync_in_ns);
+    g_vsync_period_ns = period_ns;
+    g_vsync_seen_ns = now;
+    pthread_mutex_unlock(&g_vsync_lock);
+}
+
 static void *vi_thread(void *arg) {
     (void)arg;
     uint64_t deadline = now_ns();
+    int locked = 0, no_lock = getenv("RT_NO_VSYNC_LOCK") != NULL;
     while (!g_quit) {
         int hz = rt_settings.fps_limit > 0 ? rt_settings.fps_limit : 60;
-        sleep_until(&deadline, 1000000000ull / (uint64_t)hz);
+        uint64_t period = 1000000000ull / (uint64_t)hz;
+        pthread_mutex_lock(&g_vsync_lock);
+        uint64_t vs = g_vsync_ns, dp = g_vsync_period_ns, seen = g_vsync_seen_ns;
+        pthread_mutex_unlock(&g_vsync_lock);
+        int lock_now = 0;
+        if (hz == 60 && dp > 2000000ull && now_ns() - seen < 250000000ull && !no_lock) {
+            uint64_t k = (period + dp / 2) / dp;
+            if (k < 1) k = 1;
+            uint64_t p = dp * k;
+            if (p > period - period / 40 && p < period + period / 40) {   /* within 2.5% of 60 Hz */
+                period = p;
+                lock_now = 1;
+                /* pull the next deadline toward vsync + half a refresh (any refresh will do) */
+                uint64_t next = deadline + period, target = vs + dp / 2;
+                int64_t err = (int64_t)((next - target) % dp);
+                if (next < target) err = -(int64_t)((target - next) % dp);
+                if (err > (int64_t)dp / 2) err -= (int64_t)dp;
+                if (err < -(int64_t)dp / 2) err += (int64_t)dp;
+                deadline -= (uint64_t)(err / 4);
+            }
+        }
+        if (lock_now != locked) {
+            locked = lock_now;
+            rt_log(1, "vi: %s", locked ? "locked to the display refresh" : "free-running timer");
+        }
+        sleep_until(&deadline, period);
         rt_irq_vi_tick();
     }
     return NULL;

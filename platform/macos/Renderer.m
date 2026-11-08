@@ -3,6 +3,7 @@
 #import "Renderer.h"
 #import "GameView.h"
 #import "InputManager.h"
+#import "MetalGX.h"
 #include "rt.h"
 
 typedef struct {
@@ -106,13 +107,24 @@ static MTLViewport viewport_for(CGSize out, uint32_t sw, uint32_t sh, bool wide)
     if (!rp || !drawable) return;
     id<MTLCommandBuffer> cb = [_queue commandBuffer];
     id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
-    if (_frameTex && _pipeline) {
+    /* Internal resolution above 1x: the GX renderer keeps a full-resolution
+     * copy of what it wrote to this XFB. The retro filters (Scale2x, CRT,
+     * LCD) work on native pixels, so they keep using the XFB. */
+    id<MTLTexture> src = _frameTex;
+    bool retro = rt_settings.output_filter == RT_FILTER_SCALE2X || rt_settings.output_filter == RT_FILTER_CRT ||
+                 rt_settings.output_filter == RT_FILTER_LCD;
+    if (have && !retro && _frameTex) {
+        uint32_t lw = 0, lh = 0;
+        id<MTLTexture> hi = rt_metal_gx_frame(fr.xfb, &lw, &lh);
+        if (hi && hi.device == _device) src = hi;
+    }
+    if (src && _pipeline) {
         MTLViewport vp = viewport_for(view.drawableSize, _texW, _texH, have && fr.widescreen);
         [enc setViewport:vp];
-        PresentParams p = { (float)_texW, (float)_texH, (float)vp.width, (float)vp.height,
+        PresentParams p = { (float)src.width, (float)src.height, (float)vp.width, (float)vp.height,
                             (int32_t)rt_settings.output_filter, rt_settings.crt_scanline, rt_settings.sharpness, 0 };
         [enc setRenderPipelineState:_pipeline];
-        [enc setFragmentTexture:_frameTex atIndex:0];
+        [enc setFragmentTexture:src atIndex:0];
         [enc setFragmentBytes:&p length:sizeof p atIndex:0];
         [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     }

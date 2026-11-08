@@ -2,11 +2,30 @@
 // drives the Renderer once per display refresh.
 #import "GameView.h"
 #import <QuartzCore/CAMetalLayer.h>
+#import <CoreVideo/CoreVideo.h>
+#include <mach/mach_time.h>
 #import "InputManager.h"
 #import "Renderer.h"
 #include "rt.h"
 
+/* Display refresh -> runtime, so the game's 60 Hz clock locks to the screen
+ * (runs on CoreVideo's display-link thread). */
+static CVReturn display_tick(CVDisplayLinkRef link, const CVTimeStamp *now, const CVTimeStamp *out,
+                             CVOptionFlags flags, CVOptionFlags *flags_out, void *ctx) {
+    (void)now; (void)flags; (void)flags_out; (void)ctx;
+    static mach_timebase_info_data_t tb;
+    if (!tb.denom) mach_timebase_info(&tb);
+    double period = CVDisplayLinkGetActualOutputVideoRefreshPeriod(link);
+    if (period <= 0 && out->videoTimeScale) period = (double)out->videoRefreshPeriod / out->videoTimeScale;
+    if (period <= 0) return kCVReturnSuccess;
+    int64_t delta_ticks = (int64_t)(out->hostTime - mach_absolute_time());
+    int64_t delta_ns = delta_ticks * (int64_t)tb.numer / (int64_t)tb.denom;
+    rt_vi_display_sync(delta_ns, (uint64_t)(period * 1e9));
+    return kCVReturnSuccess;
+}
+
 @implementation GameView {
+    CVDisplayLinkRef _link;
     Renderer *_renderer;
     CFTimeInterval _fpsStart;
     uint64_t _fpsFrames, _lastGameFrame;
@@ -22,6 +41,10 @@
         _renderer = [[Renderer alloc] initWithView:self];
         self.delegate = _renderer;
         [self settingsChanged];
+        if (CVDisplayLinkCreateWithActiveCGDisplays(&_link) == kCVReturnSuccess) {
+            CVDisplayLinkSetOutputCallback(_link, display_tick, NULL);
+            CVDisplayLinkStart(_link);
+        }
     }
     return self;
 }
@@ -30,6 +53,24 @@
     self.preferredFramesPerSecond = 120;     // present as soon as the game produces a frame
     ((CAMetalLayer *)self.layer).displaySyncEnabled = rt_settings.vsync;
     [_renderer settingsChanged];
+}
+
+- (void)dealloc {
+    if (_link) { CVDisplayLinkStop(_link); CVDisplayLinkRelease(_link); }
+}
+
+/* follow the window to the screen it is on (refresh rates can differ) */
+- (void)viewDidMoveToWindow {
+    [super viewDidMoveToWindow];
+    [[NSNotificationCenter defaultCenter] removeObserver:self name:NSWindowDidChangeScreenNotification object:nil];
+    if (self.window) [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(screenChanged:)
+                                                                  name:NSWindowDidChangeScreenNotification object:self.window];
+    [self screenChanged:nil];
+}
+- (void)screenChanged:(NSNotification *)n {
+    (void)n;
+    NSNumber *sid = self.window.screen.deviceDescription[@"NSScreenNumber"];
+    if (_link && sid) CVDisplayLinkSetCurrentCGDisplay(_link, (CGDirectDisplayID)sid.unsignedIntValue);
 }
 
 - (BOOL)acceptsFirstResponder { return YES; }

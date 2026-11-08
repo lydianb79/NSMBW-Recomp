@@ -14,10 +14,21 @@
  * Work is batched into one command buffer until the game copies the EFB
  * (display or render-to-texture); then the batch is submitted, and the copied
  * rectangle is read back for the CPU-side copy encoder.
+ *
+ * Enhancements (Settings > Graphics):
+ *   - internal resolution: the EFB is rendered at N x 640x528. GPU-side
+ *     texture copies are made at N x too; CPU readbacks are box-filtered down
+ *     to 1x; display copies are kept at full resolution and handed to the
+ *     presenter (rt_metal_gx_frame) for the XFB the VI is showing,
+ *   - MSAA (2x/4x) on the EFB, resolved before every copy,
+ *   - anisotropic filtering: uploaded textures get a mip chain and samplers
+ *     use trilinear + anisotropy (gradients come from the un-warped texture
+ *     coordinates, so indirect warps do not cause blurry seams).
  */
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "MetalGX.h"
@@ -55,14 +66,16 @@ static NSString *const kShaderSource = @"#include <metal_stdlib>\n"
 "  o.t6 = float2(p.tex[6][0], p.tex[6][1]); o.t7 = float2(p.tex[7][0], p.tex[7][1]);\n"
 "  return o;\n"
 "}\n"
-"static float4 tap(int k, float2 uv, texture2d<float> t0, texture2d<float> t1, texture2d<float> t2, texture2d<float> t3,\n"
+"struct TScale { float s[8][2]; };\n"
+"static float4 tap(int k, float2 uv, float2 gx, float2 gy, texture2d<float> t0, texture2d<float> t1, texture2d<float> t2, texture2d<float> t3,\n"
 "                 texture2d<float> t4, texture2d<float> t5, texture2d<float> t6, texture2d<float> t7,\n"
 "                 sampler s0, sampler s1, sampler s2, sampler s3, sampler s4, sampler s5, sampler s6, sampler s7) {\n"
+"  gradient2d g = gradient2d(gx, gy);\n"
 "  switch (k) {\n"
-"  case 0: return t0.sample(s0, uv, level(0)); case 1: return t1.sample(s1, uv, level(0));\n"
-"  case 2: return t2.sample(s2, uv, level(0)); case 3: return t3.sample(s3, uv, level(0));\n"
-"  case 4: return t4.sample(s4, uv, level(0)); case 5: return t5.sample(s5, uv, level(0));\n"
-"  case 6: return t6.sample(s6, uv, level(0)); default: return t7.sample(s7, uv, level(0));\n"
+"  case 0: return t0.sample(s0, uv, g); case 1: return t1.sample(s1, uv, g);\n"
+"  case 2: return t2.sample(s2, uv, g); case 3: return t3.sample(s3, uv, g);\n"
+"  case 4: return t4.sample(s4, uv, g); case 5: return t5.sample(s5, uv, g);\n"
+"  case 6: return t6.sample(s6, uv, g); default: return t7.sample(s7, uv, g);\n"
 "  }\n"
 "}\n"
 "static float2 dims(int k, texture2d<float> t0, texture2d<float> t1, texture2d<float> t2, texture2d<float> t3,\n"
@@ -92,7 +105,7 @@ static NSString *const kShaderSource = @"#include <metal_stdlib>\n"
 "  switch (f) { case 0: return false; case 1: return a < r; case 2: return a == r; case 3: return a <= r;\n"
 "  case 4: return a > r; case 5: return a != r; case 6: return a >= r; default: return true; }\n"
 "}\n"
-"fragment float4 gx_fs(VOut in [[stage_in]], constant Tev &T [[buffer(0)]],\n"
+"fragment float4 gx_fs(VOut in [[stage_in]], constant Tev &T [[buffer(0)]], constant TScale &TS [[buffer(1)]],\n"
 "  texture2d<float> x0 [[texture(0)]], texture2d<float> x1 [[texture(1)]], texture2d<float> x2 [[texture(2)]], texture2d<float> x3 [[texture(3)]],\n"
 "  texture2d<float> x4 [[texture(4)]], texture2d<float> x5 [[texture(5)]], texture2d<float> x6 [[texture(6)]], texture2d<float> x7 [[texture(7)]],\n"
 "  sampler s0 [[sampler(0)]], sampler s1 [[sampler(1)]], sampler s2 [[sampler(2)]], sampler s3 [[sampler(3)]],\n"
@@ -101,11 +114,15 @@ static NSString *const kShaderSource = @"#include <metal_stdlib>\n"
 "  for (int r = 0; r < 4; r++) R[r] = int4(T.regs[r][0], T.regs[r][1], T.regs[r][2], T.regs[r][3]);\n"
 "  int4 ras0 = clamp(int4(in.c0 + 0.5), 0, 255), ras1 = clamp(int4(in.c1 + 0.5), 0, 255);\n"
 "  float2 tc[8] = { in.t0, in.t1, in.t2, in.t3, in.t4, in.t5, in.t6, in.t7 };\n"
+"  float2 gdx[8], gdy[8];\n"
+"  for (int i = 0; i < 8; i++) { gdx[i] = dfdx(tc[i]); gdy[i] = dfdy(tc[i]); }\n"
 "  int3 ind[4] = { int3(0), int3(0), int3(0), int3(0) };\n"
 "  for (int i = 0; i < T.nind; i++) {\n"
 "    if (T.ind_slot[i] < 0) continue;\n"
-"    float2 uv = tc[T.ind_coord[i] & 7] * float2(T.ind_div_s[i], T.ind_div_t[i]);\n"
-"    int4 c = int4(tap(T.ind_slot[i], uv, x0, x1, x2, x3, x4, x5, x6, x7, s0, s1, s2, s3, s4, s5, s6, s7) * 255.0 + 0.5);\n"
+"    float2 dv = float2(T.ind_div_s[i], T.ind_div_t[i]);\n"
+"    int ic = T.ind_coord[i] & 7;\n"
+"    float2 uv = tc[ic] * dv;\n"
+"    int4 c = int4(tap(T.ind_slot[i], uv, gdx[ic] * dv, gdy[ic] * dv, x0, x1, x2, x3, x4, x5, x6, x7, s0, s1, s2, s3, s4, s5, s6, s7) * 255.0 + 0.5);\n"
 "    ind[i] = int3(c.w, c.z, c.y);\n"
 "  }\n"
 "  float2 prevc = float2(0.0);\n"
@@ -115,7 +132,8 @@ static NSString *const kShaderSource = @"#include <metal_stdlib>\n"
 "    int bump = 0;\n"
 "    float2 suv = tc[S.coord & 7];\n"
 "    if (T.ind_active != 0) {\n"
-"      float2 td = S.tex_slot >= 0 ? dims(S.tex_slot, x0, x1, x2, x3, x4, x5, x6, x7) : float2(1.0);\n"
+"      float2 td = S.tex_slot >= 0 ? dims(S.tex_slot, x0, x1, x2, x3, x4, x5, x6, x7) /\n"
+"                  float2(TS.s[S.tex_slot & 7][0], TS.s[S.tex_slot & 7][1]) : float2(1.0);\n"
 "      float2 texel = suv * td;\n"
 "      float2 w = float2(wrap_ind(texel.x, S.isw), wrap_ind(texel.y, S.itw));\n"
 "      float2 off = float2(0.0);\n"
@@ -146,7 +164,7 @@ static NSString *const kShaderSource = @"#include <metal_stdlib>\n"
 "      suv = f / td;\n"
 "    }\n"
 "    if (S.tex_slot >= 0) {\n"
-"      float4 c = tap(S.tex_slot, suv, x0, x1, x2, x3, x4, x5, x6, x7, s0, s1, s2, s3, s4, s5, s6, s7);\n"
+"      float4 c = tap(S.tex_slot, suv, gdx[S.coord & 7], gdy[S.coord & 7], x0, x1, x2, x3, x4, x5, x6, x7, s0, s1, s2, s3, s4, s5, s6, s7);\n"
 "      tx = int4(c * 255.0 + 0.5);\n"
 "    }\n"
 "    int ab = S.ras == 4 ? (bump | (bump >> 5)) : bump;\n"
@@ -217,10 +235,17 @@ static NSString *const kShaderSource = @"#include <metal_stdlib>\n"
 "    q = c.fmt == 3 ? int4(l, l, l, q.a) : int4(l);\n"
 "  }\n"
 "  return float4(q) / 255.0;\n"
+"}\n"
+"struct DownIn { int scale, x, y, pad; };\n"
+"fragment float4 down_fs(float4 pos [[position]], constant DownIn &c [[buffer(0)]], texture2d<float> efb [[texture(0)]]) {\n"
+"  int2 s0 = (int2(pos.xy) + int2(c.x, c.y)) * c.scale;\n"
+"  float4 v = float4(0.0);\n"
+"  for (int j = 0; j < c.scale; j++) for (int i = 0; i < c.scale; i++) v += efb.read(uint2(s0 + int2(i, j)));\n"
+"  return v / float(c.scale * c.scale);\n"
 "}\n";
 
 /* ------------------------------------------------------------ state */
-typedef struct { uint64_t hash; uint32_t w, h; uint64_t used_pass; } MTex;   /* texture objects live in g_mtex_tex */
+typedef struct { uint64_t hash; uint32_t w, h; uint64_t used_pass; int mips; } MTex;   /* texture objects live in g_mtex_tex */
 
 static id<MTLDevice> g_dev;
 static id<MTLCommandQueue> g_queue;
@@ -238,8 +263,22 @@ static id<MTLSamplerState> g_samplers[3][3][2];
 static MTex g_mtex[TEX_SLOTS];
 static id<MTLTexture> g_mtex_tex[TEX_SLOTS];
 static uint64_t g_draws, g_flushes, g_copies_gpu;
-static id<MTLRenderPipelineState> g_copy_pipe;
+static id<MTLRenderPipelineState> g_copy_pipe, g_down_pipe;
 static NSMutableDictionary<NSNumber *, id<MTLTexture>> *g_copy_tex;   /* guest address -> copy */
+
+/* enhancement state; render targets are rebuilt between frames when the settings change */
+static int g_scale = 1, g_msaa = 1, g_aniso = 1;
+static id<MTLTexture> g_efb_ms;       /* MSAA colour (resolves into g_efb), nil without MSAA */
+static id<MTLTexture> g_efb1;         /* 1x CPU-readable copy when g_scale > 1 */
+
+/* full-resolution display copies, by XFB address (ring of 3 so the presenter
+ * never samples one the game is writing) */
+#define DISP_RING 3
+typedef struct { id<MTLTexture> tex; uint32_t xfb, w, h; uint64_t seq; } DispCopy;
+static DispCopy g_disp[DISP_RING];
+static int g_disp_next, g_disp_pending = -1;
+static uint64_t g_disp_seq;
+static NSLock *g_disp_lock;
 
 static MTLBlendFactor gx_factor(int f, bool is_src, bool no_alpha) {
     switch (f) {
@@ -266,6 +305,7 @@ static id<MTLRenderPipelineState> pipeline(uint32_t key) {
     d.fragmentFunction = [g_lib newFunctionWithName:clear ? @"clear_fs" : @"gx_fs"];
     d.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
     d.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+    d.rasterSampleCount = (NSUInteger)g_msaa;
     MTLColorWriteMask m = MTLColorWriteMaskNone;
     if ((key >> 8) & 1) m |= MTLColorWriteMaskRed | MTLColorWriteMaskGreen | MTLColorWriteMaskBlue;
     if ((key >> 9) & 1) m |= MTLColorWriteMaskAlpha;
@@ -305,46 +345,96 @@ static id<MTLDepthStencilState> depth_state(int enable, int func, int update) {
     return s;
 }
 
+/* 2x2 box filter of one mip level (odd sizes clamp at the edge) */
+static void mip_down(const uint8_t *src, uint32_t sw, uint32_t sh, uint8_t *dst, uint32_t dw, uint32_t dh) {
+    for (uint32_t y = 0; y < dh; y++) {
+        uint32_t y0 = y * 2 < sh ? y * 2 : sh - 1, y1 = y * 2 + 1 < sh ? y * 2 + 1 : y0;
+        for (uint32_t x = 0; x < dw; x++) {
+            uint32_t x0 = x * 2 < sw ? x * 2 : sw - 1, x1 = x * 2 + 1 < sw ? x * 2 + 1 : x0;
+            const uint8_t *a = src + ((size_t)y0 * sw + x0) * 4, *b = src + ((size_t)y0 * sw + x1) * 4;
+            const uint8_t *c = src + ((size_t)y1 * sw + x0) * 4, *d = src + ((size_t)y1 * sw + x1) * 4;
+            uint8_t *o = dst + ((size_t)y * dw + x) * 4;
+            for (int k = 0; k < 4; k++) o[k] = (uint8_t)((a[k] + b[k] + c[k] + d[k] + 2) >> 2);
+        }
+    }
+}
+
 static id<MTLTexture> upload(const RtGpuTex *t) {
     int slot = t->cache_slot;
     if (slot < 0 || slot >= TEX_SLOTS) slot = 0;
     MTex *e = &g_mtex[slot];
-    if (g_mtex_tex[slot] && e->hash == t->hash && e->w == t->w && e->h == t->h) { e->used_pass = g_pass; return g_mtex_tex[slot]; }
+    int mips = g_aniso > 1 && (t->w > 1 || t->h > 1);
+    if (g_mtex_tex[slot] && e->hash == t->hash && e->w == t->w && e->h == t->h && e->mips == mips) {
+        e->used_pass = g_pass; return g_mtex_tex[slot];
+    }
     /* never overwrite a texture that queued (uncommitted) draws still sample */
-    if (!g_mtex_tex[slot] || e->w != t->w || e->h != t->h || e->used_pass == g_pass) {
+    if (!g_mtex_tex[slot] || e->w != t->w || e->h != t->h || e->mips != mips || e->used_pass == g_pass) {
         MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
-                                                                                     width:t->w height:t->h mipmapped:NO];
+                                                                                     width:t->w height:t->h mipmapped:mips ? YES : NO];
         td.usage = MTLTextureUsageShaderRead;
         td.storageMode = MTLStorageModeShared;
         g_mtex_tex[slot] = [g_dev newTextureWithDescriptor:td];
-        e->w = t->w; e->h = t->h;
+        e->w = t->w; e->h = t->h; e->mips = mips;
     }
-    [g_mtex_tex[slot] replaceRegion:MTLRegionMake2D(0, 0, t->w, t->h) mipmapLevel:0 withBytes:t->rgba bytesPerRow:t->w * 4];
+    id<MTLTexture> tex = g_mtex_tex[slot];
+    [tex replaceRegion:MTLRegionMake2D(0, 0, t->w, t->h) mipmapLevel:0 withBytes:t->rgba bytesPerRow:t->w * 4];
+    if (mips) {
+        static uint8_t *buf[2]; static size_t cap;
+        size_t need = (size_t)t->w * t->h * 4;
+        if (need > cap) {
+            free(buf[0]); free(buf[1]);
+            buf[0] = malloc(need); buf[1] = malloc(need);
+            cap = (buf[0] && buf[1]) ? need : 0;
+        }
+        const uint8_t *src = (const uint8_t *)t->rgba;
+        uint32_t w = t->w, h = t->h;
+        for (NSUInteger lv = 1; cap && lv < tex.mipmapLevelCount; lv++) {
+            uint32_t nw = w > 1 ? w / 2 : 1, nh = h > 1 ? h / 2 : 1;
+            uint8_t *dst = buf[lv & 1];
+            mip_down(src, w, h, dst, nw, nh);
+            [tex replaceRegion:MTLRegionMake2D(0, 0, nw, nh) mipmapLevel:lv withBytes:dst bytesPerRow:nw * 4];
+            src = dst; w = nw; h = nh;
+        }
+    }
     e->hash = t->hash;
     e->used_pass = g_pass;
-    return g_mtex_tex[slot];
+    return tex;
 }
 
 static void begin_pass(void) {
     if (g_enc) return;
     if (!g_cb) g_cb = [g_queue commandBuffer];
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
-    rp.colorAttachments[0].texture = g_efb;
-    rp.colorAttachments[0].loadAction = g_efb_ready ? MTLLoadActionLoad : MTLLoadActionClear;
+    MTLLoadAction load = g_efb_ready ? MTLLoadActionLoad : MTLLoadActionClear;
+    if (g_efb_ms) {
+        rp.colorAttachments[0].texture = g_efb_ms;
+        rp.colorAttachments[0].resolveTexture = g_efb;
+        rp.colorAttachments[0].storeAction = MTLStoreActionStoreAndMultisampleResolve;
+    } else {
+        rp.colorAttachments[0].texture = g_efb;
+        rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+    }
+    rp.colorAttachments[0].loadAction = load;
     rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
-    rp.colorAttachments[0].storeAction = MTLStoreActionStore;
     rp.depthAttachment.texture = g_depth;
-    rp.depthAttachment.loadAction = g_efb_ready ? MTLLoadActionLoad : MTLLoadActionClear;
+    rp.depthAttachment.loadAction = load;
     rp.depthAttachment.clearDepth = 1.0;
     rp.depthAttachment.storeAction = MTLStoreActionStore;
     g_efb_ready = true;
     g_enc = [g_cb renderCommandEncoderWithDescriptor:rp];
-    [g_enc setViewport:(MTLViewport){ 0, 0, EFB_W, EFB_H, 0, 1 }];
+    [g_enc setViewport:(MTLViewport){ 0, 0, (double)(EFB_W * g_scale), (double)(EFB_H * g_scale), 0, 1 }];
     [g_enc setDepthClipMode:MTLDepthClipModeClamp];
     for (int i = 0; i < 8; i++) {
         [g_enc setFragmentTexture:g_white atIndex:i];
         [g_enc setFragmentSamplerState:g_samplers[0][0][0] atIndex:i];
     }
+}
+
+/* end the open EFB pass (resolving MSAA) so the EFB can be read by a copy */
+static void end_pass(void) {
+    begin_pass();
+    [g_enc endEncoding];
+    g_enc = nil;
 }
 
 static void flush(void) {
@@ -373,7 +463,103 @@ static void set_scissor(int x0, int y0, int x1, int y1) {
     if (x1 > EFB_W - 1) x1 = EFB_W - 1;
     if (y1 > EFB_H - 1) y1 = EFB_H - 1;
     if (x1 < x0 || y1 < y0) { x0 = y0 = 0; x1 = y1 = 0; }
-    [g_enc setScissorRect:(MTLScissorRect){ (NSUInteger)x0, (NSUInteger)y0, (NSUInteger)(x1 - x0 + 1), (NSUInteger)(y1 - y0 + 1) }];
+    NSUInteger S = (NSUInteger)g_scale;
+    [g_enc setScissorRect:(MTLScissorRect){ (NSUInteger)x0 * S, (NSUInteger)y0 * S,
+                                            (NSUInteger)(x1 - x0 + 1) * S, (NSUInteger)(y1 - y0 + 1) * S }];
+}
+
+/* ------------------------------------------------------------ render targets / settings */
+static void make_samplers(void) {
+    static const MTLSamplerAddressMode modes[3] = { MTLSamplerAddressModeClampToEdge, MTLSamplerAddressModeRepeat,
+                                                   MTLSamplerAddressModeMirrorRepeat };
+    for (int s = 0; s < 3; s++)
+        for (int t = 0; t < 3; t++)
+            for (int l = 0; l < 2; l++) {
+                MTLSamplerDescriptor *sd = [[MTLSamplerDescriptor alloc] init];
+                sd.sAddressMode = modes[s];
+                sd.tAddressMode = modes[t];
+                sd.minFilter = sd.magFilter = l ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
+                if (g_aniso > 1) {
+                    sd.mipFilter = l ? MTLSamplerMipFilterLinear : MTLSamplerMipFilterNearest;
+                    if (l) sd.maxAnisotropy = (NSUInteger)g_aniso;
+                } else {
+                    sd.mipFilter = MTLSamplerMipFilterNotMipmapped;
+                }
+                g_samplers[s][t][l] = [g_dev newSamplerStateWithDescriptor:sd];
+            }
+}
+
+static bool make_targets(int scale, int msaa) {
+    NSUInteger W = (NSUInteger)(EFB_W * scale), H = (NSUInteger)(EFB_H * scale);
+    MTLTextureDescriptor *cd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                  width:W height:H mipmapped:NO];
+    cd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    id<MTLTexture> efb = nil, efb1 = nil, ms = nil, depth = nil;
+    /* Apple silicon: CPU readback straight from a shared texture; Intel Macs
+     * do not allow shared textures, so use managed + synchronizeResource */
+    MTLStorageMode cpu_mode = g_dev.hasUnifiedMemory ? MTLStorageModeShared : MTLStorageModeManaged;
+    if (scale == 1) {
+        cd.storageMode = cpu_mode;
+        efb = [g_dev newTextureWithDescriptor:cd];
+    } else {
+        cd.storageMode = MTLStorageModePrivate;
+        efb = [g_dev newTextureWithDescriptor:cd];
+        MTLTextureDescriptor *d1 = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                      width:EFB_W height:EFB_H mipmapped:NO];
+        d1.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+        d1.storageMode = cpu_mode;
+        efb1 = [g_dev newTextureWithDescriptor:d1];
+        if (!efb1) return false;
+    }
+    if (!efb) return false;
+    if (msaa > 1) {
+        MTLTextureDescriptor *md = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                      width:W height:H mipmapped:NO];
+        md.textureType = MTLTextureType2DMultisample;
+        md.sampleCount = (NSUInteger)msaa;
+        md.usage = MTLTextureUsageRenderTarget;
+        md.storageMode = MTLStorageModePrivate;
+        ms = [g_dev newTextureWithDescriptor:md];
+        if (!ms) return false;
+    }
+    MTLTextureDescriptor *dd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
+                                                                                  width:W height:H mipmapped:NO];
+    dd.usage = MTLTextureUsageRenderTarget;
+    dd.storageMode = MTLStorageModePrivate;
+    if (msaa > 1) { dd.textureType = MTLTextureType2DMultisample; dd.sampleCount = (NSUInteger)msaa; }
+    depth = [g_dev newTextureWithDescriptor:dd];
+    if (!depth) return false;
+    g_efb = efb; g_efb1 = efb1; g_efb_ms = ms; g_depth = depth;
+    if (msaa != g_msaa) [g_pipes removeAllObjects];      /* sample count is baked into pipelines */
+    g_scale = scale; g_msaa = msaa;
+    g_efb_ready = false;
+    return true;
+}
+
+/* called between frames: picks up changed Settings > Graphics values */
+static void apply_settings(void) {
+    int scale = rt_settings.internal_res < 1 ? 1 : rt_settings.internal_res > 8 ? 8 : rt_settings.internal_res;
+    const char *e = getenv("RT_INTERNAL_RES");
+    if (e && atoi(e) >= 1 && atoi(e) <= 8) scale = atoi(e);
+    if (!g_down_pipe) scale = 1;                     /* no way to read a scaled EFB back */
+    int msaa = rt_settings.msaa >= 4 ? 4 : rt_settings.msaa >= 2 ? 2 : 1;
+    while (msaa > 1 && ![g_dev supportsTextureSampleCount:(NSUInteger)msaa]) msaa /= 2;
+    while (msaa > 1 && scale * scale * msaa > 64) msaa /= 2;      /* keep the EFB within ~350 MB */
+    int aniso = rt_settings.anisotropy >= 16 ? 16 : rt_settings.anisotropy >= 8 ? 8 : rt_settings.anisotropy >= 4 ? 4 :
+                rt_settings.anisotropy >= 2 ? 2 : 1;
+    if (aniso != g_aniso) { g_aniso = aniso; make_samplers(); }
+    static int failed_s, failed_m;                   /* don't retry a failed size every frame */
+    if ((scale != g_scale || msaa != g_msaa || !g_efb) && !(scale == failed_s && msaa == failed_m && g_efb)) {
+        int old_s = g_scale, old_m = g_msaa;
+        if (!make_targets(scale, msaa)) {
+            rt_log(0, "metal: %dx / %dx MSAA render targets failed, keeping %dx / %dx", scale, msaa, old_s, old_m);
+            failed_s = scale; failed_m = msaa;
+            if (!g_efb) make_targets(1, 1);
+        } else {
+            rt_log(1, "metal: internal resolution %dx (%dx%d), MSAA %dx, anisotropy %dx",
+                   g_scale, EFB_W * g_scale, EFB_H * g_scale, g_msaa, g_aniso);
+        }
+    }
 }
 
 /* ------------------------------------------------------------ sink */
@@ -398,6 +584,9 @@ static void mtl_draw(const RtGpuDraw *d) {
         set_scissor(d->sx0, d->sy0, d->sx1, d->sy1);
         [g_enc setVertexBuffer:g_vbuf offset:g_voff atIndex:0];
         [g_enc setFragmentBytes:&d->tev length:sizeof d->tev atIndex:0];
+        /* physical / logical size of each texture: EFB copies are stored at the internal resolution */
+        float tscale[8][2];
+        for (int i = 0; i < 8; i++) tscale[i][0] = tscale[i][1] = 1.0f;
         for (int i = 0; i < d->ntex && i < 8; i++) {
             const RtGpuTex *t = &d->tex[i];
             if (!t->w || !t->h) continue;
@@ -405,10 +594,13 @@ static void mtl_draw(const RtGpuDraw *d) {
             if (!t->rgba) tex = g_copy_tex[@(t->efb_copy)];
             else tex = upload(t);
             if (!tex) continue;
+            tscale[i][0] = (float)tex.width / (float)t->w;
+            tscale[i][1] = (float)tex.height / (float)t->h;
             [g_enc setFragmentTexture:tex atIndex:(NSUInteger)i];
             int ws = t->wrap_s < 0 || t->wrap_s > 2 ? 0 : t->wrap_s, wt = t->wrap_t < 0 || t->wrap_t > 2 ? 0 : t->wrap_t;
             [g_enc setFragmentSamplerState:g_samplers[ws][wt][t->linear ? 1 : 0] atIndex:(NSUInteger)i];
         }
+        [g_enc setFragmentBytes:tscale length:sizeof tscale atIndex:1];
         [g_enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:d->ntri * 3 indexType:MTLIndexTypeUInt32
                          indexBuffer:g_ibuf indexBufferOffset:g_ioff];
         g_voff += (vbytes + 255) & ~255u;
@@ -439,18 +631,50 @@ static void mtl_clear(int x, int y, int w, int h, uint32_t rgba, float z, int cu
 
 static void mtl_readback(int x, int y, int w, int h, uint32_t *dst, int stride) {
     @autoreleasepool {
+        id<MTLTexture> src = g_efb;
+        if (g_scale > 1 && g_efb_ready && w > 0 && h > 0 && g_down_pipe) {
+            /* box-filter the scaled EFB down to 1x for the CPU */
+            end_pass();
+            MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+            rp.colorAttachments[0].texture = g_efb1;
+            rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
+            rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+            id<MTLRenderCommandEncoder> e = [g_cb renderCommandEncoderWithDescriptor:rp];
+            struct { int32_t scale, x, y, pad; } c = { g_scale, 0, 0, 0 };
+            [e setRenderPipelineState:g_down_pipe];
+            [e setScissorRect:(MTLScissorRect){ (NSUInteger)x, (NSUInteger)y, (NSUInteger)w, (NSUInteger)h }];
+            [e setFragmentBytes:&c length:sizeof c atIndex:0];
+            [e setFragmentTexture:g_efb atIndex:0];
+            [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+            [e endEncoding];
+            if (g_efb1.storageMode == MTLStorageModeManaged) {
+                id<MTLBlitCommandEncoder> b = [g_cb blitCommandEncoder];
+                [b synchronizeResource:g_efb1];
+                [b endEncoding];
+            }
+            src = g_efb1;
+        }
         flush();
-        if (!g_efb_ready || w <= 0 || h <= 0) return;
-        if (stride == w) {
-            [g_efb getBytes:dst bytesPerRow:(NSUInteger)w * 4 fromRegion:MTLRegionMake2D((NSUInteger)x, (NSUInteger)y, (NSUInteger)w, (NSUInteger)h) mipmapLevel:0];
-        } else {
-            for (int r = 0; r < h; r++)
-                [g_efb getBytes:dst + (size_t)r * stride bytesPerRow:(NSUInteger)w * 4
-                     fromRegion:MTLRegionMake2D((NSUInteger)x, (NSUInteger)(y + r), (NSUInteger)w, 1) mipmapLevel:0];
+        /* a display copy queued by mtl_display is complete now: publish it */
+        if (g_disp_pending >= 0) {
+            [g_disp_lock lock];
+            g_disp[g_disp_pending].seq = ++g_disp_seq;
+            [g_disp_lock unlock];
+            g_disp_pending = -1;
+        }
+        if (g_efb_ready && w > 0 && h > 0) {
+            if (stride == w) {
+                [src getBytes:dst bytesPerRow:(NSUInteger)w * 4 fromRegion:MTLRegionMake2D((NSUInteger)x, (NSUInteger)y, (NSUInteger)w, (NSUInteger)h) mipmapLevel:0];
+            } else {
+                for (int r = 0; r < h; r++)
+                    [src getBytes:dst + (size_t)r * stride bytesPerRow:(NSUInteger)w * 4
+                       fromRegion:MTLRegionMake2D((NSUInteger)x, (NSUInteger)(y + r), (NSUInteger)w, 1) mipmapLevel:0];
+            }
         }
         static uint64_t n;
         if ((++n % 600) == 0) rt_log(1, "metal: %llu draws, %llu submits, %llu GPU texture copies",
                                      (unsigned long long)g_draws, (unsigned long long)g_flushes, (unsigned long long)g_copies_gpu);
+        apply_settings();      /* nothing is queued here: safe point to rebuild targets */
     }
 }
 
@@ -460,26 +684,25 @@ static int mtl_copy_tex(int x, int y, int w, int h, int half, int fmt, int no_al
     if (!g_copy_pipe || !tw || !th || tw > 1024 || th > 1024) return 0;
     @autoreleasepool {
         (void)w; (void)h;
+        NSUInteger pw = tw * (NSUInteger)g_scale, ph = th * (NSUInteger)g_scale;
         NSNumber *key = @(dest);
         id<MTLTexture> t = g_copy_tex[key];
-        if (!t || t.width != tw || t.height != th) {
+        if (!t || t.width != pw || t.height != ph) {
             MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
-                                                                                          width:tw height:th mipmapped:NO];
+                                                                                          width:pw height:ph mipmapped:NO];
             td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
             td.storageMode = MTLStorageModePrivate;
             t = [g_dev newTextureWithDescriptor:td];
             if (!t) return 0;
             g_copy_tex[key] = t;
         }
-        begin_pass();                      /* make sure everything drawn so far is encoded */
-        [g_enc endEncoding];
-        g_enc = nil;
+        end_pass();                        /* make sure everything drawn so far is encoded (and resolved) */
         MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
         rp.colorAttachments[0].texture = t;
         rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
         rp.colorAttachments[0].storeAction = MTLStoreActionStore;
         id<MTLRenderCommandEncoder> e = [g_cb renderCommandEncoderWithDescriptor:rp];
-        struct { int32_t x, y, half_, fmt, no_alpha, pad[3]; } c = { x, y, half, fmt, no_alpha, { 0, 0, 0 } };
+        struct { int32_t x, y, half_, fmt, no_alpha, pad[3]; } c = { x * g_scale, y * g_scale, half, fmt, no_alpha, { 0, 0, 0 } };
         [e setRenderPipelineState:g_copy_pipe];
         [e setFragmentBytes:&c length:sizeof c atIndex:0];
         [e setFragmentTexture:g_efb atIndex:0];
@@ -490,7 +713,64 @@ static int mtl_copy_tex(int x, int y, int w, int h, int half, int fmt, int no_al
     }
 }
 
-static const RtGpuSink k_metal = { mtl_draw, mtl_clear, mtl_readback, mtl_copy_tex };
+/* EFB -> XFB: keep a full-resolution copy for the presenter */
+static void mtl_display(int x, int y, int w, int h, uint32_t xfb) {
+    if (g_scale <= 1 || w <= 0 || h <= 0) return;      /* at 1x the XFB itself is just as good */
+    @autoreleasepool {
+        int i = g_disp_next;
+        g_disp_next = (g_disp_next + 1) % DISP_RING;
+        NSUInteger pw = (NSUInteger)(w * g_scale), ph = (NSUInteger)(h * g_scale);
+        [g_disp_lock lock];
+        g_disp[i].seq = 0;                 /* hidden from the presenter until it is complete */
+        id<MTLTexture> t = g_disp[i].tex;
+        [g_disp_lock unlock];
+        if (!t || t.width != pw || t.height != ph) {
+            MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                          width:pw height:ph mipmapped:YES];
+            td.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+            td.storageMode = MTLStorageModePrivate;
+            t = [g_dev newTextureWithDescriptor:td];
+            if (!t) return;
+        }
+        end_pass();
+        id<MTLBlitCommandEncoder> b = [g_cb blitCommandEncoder];
+        [b copyFromTexture:g_efb sourceSlice:0 sourceLevel:0
+              sourceOrigin:MTLOriginMake((NSUInteger)(x * g_scale), (NSUInteger)(y * g_scale), 0)
+                sourceSize:MTLSizeMake(pw, ph, 1)
+                 toTexture:t destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+        if (t.mipmapLevelCount > 1) [b generateMipmapsForTexture:t];
+        [b endEncoding];
+        [g_disp_lock lock];
+        g_disp[i].tex = t;
+        g_disp[i].xfb = xfb & 0x1FFFFFFFu;
+        g_disp[i].w = (uint32_t)w; g_disp[i].h = (uint32_t)h;
+        [g_disp_lock unlock];
+        g_disp_pending = i;
+    }
+}
+
+static const RtGpuSink k_metal = { mtl_draw, mtl_clear, mtl_readback, mtl_copy_tex, mtl_display };
+
+id<MTLDevice> rt_metal_gx_device(void) { return g_dev; }
+
+id<MTLTexture> rt_metal_gx_frame(uint32_t xfb, uint32_t *w, uint32_t *h) {
+    if (!g_disp_lock) return nil;
+    xfb &= 0x1FFFFFFFu;
+    id<MTLTexture> best = nil;
+    uint64_t best_seq = 0;
+    [g_disp_lock lock];
+    for (int i = 0; i < DISP_RING; i++)
+        if (g_disp[i].seq > best_seq && g_disp[i].xfb == xfb && g_disp[i].tex) {
+            best = g_disp[i].tex; best_seq = g_disp[i].seq;
+            if (w) *w = g_disp[i].w;
+            if (h) *h = g_disp[i].h;
+        }
+    /* only use it while the renderer is still scaling (a copy made before the
+     * user switched back to 1x would otherwise stay on screen) */
+    if (best && g_scale <= 1) best = nil;
+    [g_disp_lock unlock];
+    return best;
+}
 
 bool rt_metal_gx_install(void) {
     @autoreleasepool {
@@ -506,21 +786,7 @@ bool rt_metal_gx_install(void) {
         g_queue = [g_dev newCommandQueue];
         g_pipes = [NSMutableDictionary dictionary];
         g_depths = [NSMutableDictionary dictionary];
-
-        MTLTextureDescriptor *cd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
-                                                                                      width:EFB_W height:EFB_H mipmapped:NO];
-        cd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
-        cd.storageMode = MTLStorageModeShared;      /* Apple silicon: CPU readback without a blit */
-        g_efb = [g_dev newTextureWithDescriptor:cd];
-        if (!g_efb) {                               /* Intel Macs: shared render targets are not allowed */
-            cd.storageMode = MTLStorageModeManaged;
-            g_efb = [g_dev newTextureWithDescriptor:cd];
-        }
-        MTLTextureDescriptor *dd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
-                                                                                      width:EFB_W height:EFB_H mipmapped:NO];
-        dd.usage = MTLTextureUsageRenderTarget;
-        dd.storageMode = MTLStorageModePrivate;
-        g_depth = [g_dev newTextureWithDescriptor:dd];
+        g_disp_lock = [[NSLock alloc] init];
 
         MTLTextureDescriptor *wd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                                                                       width:1 height:1 mipmapped:NO];
@@ -532,23 +798,6 @@ bool rt_metal_gx_install(void) {
         g_vbuf = [g_dev newBufferWithLength:VBUF_SIZE options:MTLResourceStorageModeShared];
         g_ibuf = [g_dev newBufferWithLength:IBUF_SIZE options:MTLResourceStorageModeShared];
 
-        static const MTLSamplerAddressMode modes[3] = { MTLSamplerAddressModeClampToEdge, MTLSamplerAddressModeRepeat,
-                                                       MTLSamplerAddressModeMirrorRepeat };
-        for (int s = 0; s < 3; s++)
-            for (int t = 0; t < 3; t++)
-                for (int l = 0; l < 2; l++) {
-                    MTLSamplerDescriptor *sd = [[MTLSamplerDescriptor alloc] init];
-                    sd.sAddressMode = modes[s];
-                    sd.tAddressMode = modes[t];
-                    sd.minFilter = sd.magFilter = l ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
-                    sd.mipFilter = MTLSamplerMipFilterNotMipmapped;
-                    g_samplers[s][t][l] = [g_dev newSamplerStateWithDescriptor:sd];
-                }
-
-        if (!g_efb || !g_depth || !g_vbuf || !g_ibuf || !pipeline(0x300) || !pipeline(1u << 16 | 0x300)) {
-            rt_log(0, "metal: resource creation failed, using the software renderer");
-            return false;
-        }
         g_copy_tex = [NSMutableDictionary dictionary];
         {
             MTLRenderPipelineDescriptor *cp = [[MTLRenderPipelineDescriptor alloc] init];
@@ -558,6 +807,17 @@ bool rt_metal_gx_install(void) {
             g_copy_pipe = [g_dev newRenderPipelineStateWithDescriptor:cp error:&err];
             if (!g_copy_pipe) rt_log(0, "metal: copy pipeline failed (%s), EFB copies go through the CPU",
                                      err.localizedDescription.UTF8String);
+            cp.fragmentFunction = [g_lib newFunctionWithName:@"down_fs"];
+            g_down_pipe = [g_dev newRenderPipelineStateWithDescriptor:cp error:&err];
+            if (!g_down_pipe) rt_log(0, "metal: downsample pipeline failed (%s)", err.localizedDescription.UTF8String);
+        }
+        g_scale = 0;               /* force apply_settings to build the targets */
+        g_aniso = 0;
+        apply_settings();
+
+        if (!g_efb || !g_depth || !g_vbuf || !g_ibuf || !pipeline(0x300) || !pipeline(1u << 16 | 0x300)) {
+            rt_log(0, "metal: resource creation failed, using the software renderer");
+            return false;
         }
         rt_gx_set_gpu(&k_metal);
         rt_log(1, "renderer: Metal on %s", g_dev.name.UTF8String);

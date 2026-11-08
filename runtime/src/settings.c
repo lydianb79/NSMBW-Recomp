@@ -39,13 +39,14 @@ void rt_settings_defaults(RtSettings *s) {
     s->app_icon = 6;                    /* Pixel Leap */
     s->anisotropy = 4;
     s->msaa = 1;
-    s->widescreen_hack = false;
+    s->widescreen = true;
     s->vsync = true;
     s->fps_limit = 60;
     s->crt_scanline = 0.35f;
     s->sharpness = 0.5f;
     s->stick_deadzone = 0.25f;
     s->stick_as_dpad = true;
+    s->rumble = true;
     for (int p = 0; p < 4; p++) {
         for (int b = 0; b < RT_BTN_COUNT; b++) { s->key[p][b] = -1; s->pad[p][b] = 0; }
         s->pad_index[p] = p;
@@ -66,8 +67,8 @@ void rt_settings_defaults(RtSettings *s) {
 
 #define RT_SETTINGS_FIELDS(X) \
     X(internal_res, i) X(output_filter, e) X(scale_mode, e) X(aspect, e) X(texture_filter, e) X(renderer, i) X(audio_volume, i) X(app_icon, i) \
-    X(anisotropy, i) X(msaa, i) X(widescreen_hack, b) X(vsync, b) X(fullscreen, b) X(fps_limit, i) \
-    X(crt_scanline, f) X(sharpness, f) X(show_fps, b) X(stick_deadzone, f) X(stick_as_dpad, b)
+    X(anisotropy, i) X(msaa, i) X(widescreen, b) X(vsync, b) X(fullscreen, b) X(fps_limit, i) \
+    X(crt_scanline, f) X(sharpness, f) X(show_fps, b) X(stick_deadzone, f) X(stick_as_dpad, b) X(rumble, b)
 
 bool rt_settings_save(const RtSettings *s, const char *path) {
     FILE *f = fopen(path, "w");
